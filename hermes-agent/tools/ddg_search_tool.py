@@ -7,6 +7,7 @@ All synthesis is deferred to the LLM after the tool returns.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -52,17 +53,21 @@ def _safe_search_deep(query, validate=True, max_validate=200, query_variants=Non
         compose=False,
     )
 
+
 def _safe_expand(source_urls, query, max_new_links=25):
     if not isinstance(source_urls, list):
         source_urls = [source_urls]
     if visit_website_enhanced is None:
         return {"error": "visit_website_enhanced unavailable"}
+
     def _norm(text):
         if not text:
             return ""
         return re.sub(r"\s+", " ", text).strip()
+
     uniq = {}
     query_terms = [t.lower() for t in re.findall(r"\b\w+\b", query.lower()) if len(t) > 2]
+
     for url in source_urls:
         try:
             page = visit_website_enhanced(url)
@@ -70,17 +75,25 @@ def _safe_expand(source_urls, query, max_new_links=25):
             continue
         if not page:
             continue
-        title = _norm(page.get("title") or "")
-        links = page.get("links") or []
+
+        title = _norm(page.get("title") or page.get("url") or "")
+        links = page.get("links") or page.get("extracted_links") or []
+
         for link in links:
-            href = (link or {}).get("url") if isinstance(link, dict) else None
-            if not href or href.startswith("javascript:") or href.startswith("mailto:"):
+            if not isinstance(link, dict):
+                continue
+            href = _norm(link.get("url") or "")
+            anchor = _norm(link.get("text") or link.get("title") or "")
+            if not href:
+                continue
+            if href.startswith("javascript:") or href.startswith("mailto:"):
                 continue
             if href.startswith("//"):
                 href = "https:" + href
+
             if href in uniq:
                 continue
-            anchor = _norm((link or {}).get("text") if isinstance(link, dict) else "")
+
             score = sum(1 for t in query_terms if t in anchor.lower() or t in href.lower())
             uniq[href] = {
                 "url": href,
@@ -88,6 +101,7 @@ def _safe_expand(source_urls, query, max_new_links=25):
                 "source_title": title,
                 "score": score,
             }
+
     ranked = sorted(uniq.values(), key=lambda x: x["score"], reverse=True)[:max_new_links]
     return {
         "query": query,
@@ -120,36 +134,40 @@ def _schema_search_deep():
     }
 
 
-def _schema_visit_website_tool():
-    return {
-        "name": "visit_website_tool",
-        "description": "Visit a URL and return its rendered content using the enhanced DuckDuckGo-backed fetcher.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "format": "uri", "description": "Target URL."},
-                "extract": {"type": "boolean", "description": "Return processed markdown when supported."},
-            },
-            "required": ["url"],
-        },
-    }
-
-def _schema_web_expand():
+def _schema_expand():
     return {
         "name": "web_expand",
-        "description": "Second-level deep-research expansion: from source URLs grow new candidate links ranked by query relevance. Returns ranked candidate URLs; caller validates and fetches them.",
+        "description": "Second-level deep research expansion. From alive Level-1 results, collect linked candidate URLs ranked by simple relevance to the query.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Original deep research query. Used only as relevance signal for candidates."},
+                "query": {"type": "string", "description": "Original research query used to score relevance."},
                 "source_urls": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Source page URLs from first-level deep search.",
+                    "description": "Alive pages from Level 1 to expand from.",
                 },
-                "max_new_links": {"type": "integer", "description": "Max candidate links per expansion call."},
+                "max_new_links": {
+                    "type": "integer",
+                    "description": "Max second-level candidates to return.",
+                },
             },
             "required": ["query", "source_urls"],
+        },
+    }
+
+
+def _schema_visit():
+    return {
+        "name": "visit_website_tool",
+        "description": "Visit a single page and return its structured content.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Page URL."},
+                "max_chars": {"type": "integer", "description": "Optional content length cap."},
+            },
+            "required": ["url"],
         },
     }
 
@@ -157,48 +175,59 @@ def _schema_web_expand():
 def _schema_image_search():
     return {
         "name": "image_search",
-        "description": "Search images by query across regions and safety settings.",
+        "description": "Image search with extracted image URLs and page metadata.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Image search query."},
-                "page": {"type": "integer", "description": "Results page number."},
-                "count": {"type": "integer", "description": "Maximum results to return."},
-                "region": {"type": "string", "description": "Region code, e.g. wt-wt."},
-                "safe": {"type": "string", "description": "Safe-search strictness."},
+                "query": {"type": "string", "description": "Search query text."},
             },
             "required": ["query"],
         },
     }
 
 
-# --- Top-level module registration (must be direct calls for AST discovery) ---
+# --- Registry calls (must be module-level for AST discovery) ---
 
 registry.register(
     name="web_search_deep",
     toolset="web",
     schema=_schema_search_deep(),
     handler=lambda args, **_: _safe_search_deep(
-        query=args.get("query", ""),
+        args.get("query", ""),
         validate=args.get("validate", True),
-        max_validate=int(args.get("max_validate", 200)),
+        max_validate=int(args.get("max_validate", 200) or 200),
         query_variants=args.get("query_variants"),
     ),
     check_fn=lambda: search_deep is not None,
     emoji="🔎",
-    max_result_size_chars=80000,
+    max_result_size_chars=20000,
+)
+
+registry.register(
+    name="web_expand",
+    toolset="web",
+    schema=_schema_expand(),
+    handler=lambda args, **_: _safe_expand(
+        source_urls=args.get("source_urls", []),
+        query=args.get("query", ""),
+        max_new_links=int(args.get("max_new_links", 25) or 25),
+    ),
+    check_fn=lambda: visit_website_enhanced is not None,
+    emoji="🔗",
+    max_result_size_chars=20000,
 )
 
 registry.register(
     name="visit_website_tool",
     toolset="web",
-    schema=_schema_visit_website_tool(),
+    schema=_schema_visit(),
     handler=lambda args, **_: visit_website_enhanced(
-        url=args.get("url", ""),
-        extract=bool(args.get("extract", False)),
+        args.get("url", ""),
+        max_chars=args.get("max_chars") or None,
     ),
     check_fn=lambda: visit_website_enhanced is not None,
-    emoji="🌍",
+    emoji="🌐",
+    max_result_size_chars=20000,
 )
 
 registry.register(
@@ -206,26 +235,9 @@ registry.register(
     toolset="web",
     schema=_schema_image_search(),
     handler=lambda args, **_: image_search(
-        query=args.get("query", ""),
-        page=int(args.get("page", 1)),
-        count=int(args.get("count", 10)),
-        region=args.get("region", "wt-wt"),
-        safe=args.get("safe", "moderate"),
+        args.get("query", ""),
     ),
     check_fn=lambda: image_search is not None,
     emoji="🖼️",
-)
-
-registry.register(
-    name="web_expand",
-    toolset="web",
-    schema=_schema_web_expand(),
-    handler=lambda args, **_: _safe_expand(
-        source_urls=args.get("source_urls", []),
-        query=args.get("query", ""),
-        max_new_links=int(args.get("max_new_links", 25)),
-    ),
-    check_fn=lambda: visit_website_enhanced is not None,
-    emoji="🔗",
     max_result_size_chars=20000,
 )
