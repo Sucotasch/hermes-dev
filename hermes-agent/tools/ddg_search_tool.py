@@ -111,6 +111,43 @@ def _safe_expand(source_urls, query, max_new_links=25):
     }
 
 
+def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000):
+    """Level-2 expansion + fetch: return candidate list plus fetched page snippets."""
+    expand = _safe_expand(
+        source_urls=source_urls,
+        query=query,
+        max_new_links=max_new_links,
+    )
+    candidates = expand.get("candidates", [])
+    fetched = []
+    for c in candidates:
+        url = c.get("url")
+        if not url:
+            continue
+        try:
+            page = visit_website_enhanced(url)
+        except Exception:
+            continue
+        if not page:
+            continue
+        text = page.get("text") or page.get("content") or ""
+        fetched.append({
+            "url": url,
+            "title": page.get("title") or c.get("anchor") or url,
+            "anchor": c.get("anchor"),
+            "text": text[:max_chars],
+            "chars": len(text),
+        })
+        if len(fetched) >= max_new_links:
+            break
+    return {
+        "query": query,
+        "candidates_count": len(candidates),
+        "fetched_count": len(fetched),
+        "items": fetched,
+    }
+
+
 # --- Schemas (helpers, not registry calls) ---
 
 def _schema_search_deep():
@@ -150,6 +187,33 @@ def _schema_expand():
                 "max_new_links": {
                     "type": "integer",
                     "description": "Max second-level candidates to return.",
+                },
+            },
+            "required": ["query", "source_urls"],
+        },
+    }
+
+
+def _schema_expand_and_fetch():
+    return {
+        "name": "web_expand_and_fetch",
+        "description": "Second-level expansion plus fetch. Returns fetched Level-2 pages for synthesis.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Original research query used to score relevance."},
+                "source_urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Alive high-quality pages from Level 1 to expand from.",
+                },
+                "max_new_links": {
+                    "type": "integer",
+                    "description": "Max second-level fetched pages to return.",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Optional content length cap per fetched page.",
                 },
             },
             "required": ["query", "source_urls"],
@@ -215,6 +279,21 @@ registry.register(
     check_fn=lambda: visit_website_enhanced is not None,
     emoji="🔗",
     max_result_size_chars=20000,
+)
+
+registry.register(
+    name="web_expand_and_fetch",
+    toolset="web",
+    schema=_schema_expand_and_fetch(),
+    handler=lambda args, **_: _safe_expand_and_fetch(
+        source_urls=args.get("source_urls", []),
+        query=args.get("query", ""),
+        max_new_links=int(args.get("max_new_links", 20) or 20),
+        max_chars=int(args.get("max_chars", 5000) or 5000),
+    ),
+    check_fn=lambda: visit_website_enhanced is not None,
+    emoji="🔗🌐",
+    max_result_size_chars=40000,
 )
 
 registry.register(
