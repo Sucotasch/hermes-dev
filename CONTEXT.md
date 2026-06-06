@@ -24,12 +24,14 @@ repo:
   plugins/web-tools/ddg/
     ddg_search.py             <- backend (fixed classifier, httpx proxy, compose removed from schema)
     visit_website_enhanced.py <- enhanced fetcher (curl_cffi + websockets.asyncio)
+    compose.py                <- restored/compatible formatter (loaded conditionally)
     # image_search lives in ddg_search.py, no separate file needed
 ```
 
 ## Verified states and invariants
 - Native `web_search` is untouched and must stay as fallback.
 - Custom tools are registered by wrapper (`hermes-agent/tools/ddg_search_tool.py`) via AST-discovered `registry.register(...)` calls at module top-level.
+- Wrapper loads additional backend `compose.py` and registers it as `sys.modules["compose"]` so backend imports succeed.
 - `visit_website` in wrapper binds to `visit_website_enhanced.visit_website`.
 - `image_search` in wrapper binds to `ddg_search.image_search`.
 - `web_search_deep` in wrapper binds to `ddg_search.search_deep`.
@@ -39,36 +41,41 @@ repo:
 
 ## Registry/tool visibility (expected)
 - `web` toolset: `['image_search', 'visit_website_tool', 'web_extract', 'web_search', 'web_search_deep']`
+- Expected binding:
+  - `web_search_deep` → wrapper handler `compose_markdown` / `_safe_search_deep`
+  - `visit_website_tool` → wrapper handler `visit_website_enhanced`
+  - `image_search` → wrapper handler `image_search`
 
 ## Quick diagnostics
 ```powershell
 # Check registry and tool health from Hermes python
-python -c "import sys; sys.path.insert(0, r'C:\Users\sucot\.hermes'); from plugins.tools.registry import get_tool_names_for_toolset, get_tool; names=get_tool_names_for_toolset('web'); print('tools:', sorted(names)); bad=[n for n in names if not get_tool(n).check_fn]; print('bad:', bad)"
+python -c "import sys; sys.path.insert(0, r'C:\Users\sucot\.hermes'); from tools.registry import registry; names=sorted([n for n,e in registry._tools.items() if e.toolset=='web']); print('web tools:', names); bad=[n for n in names if not registry.get_entry(n).check_fn()]; print('bad check_fn:', bad)"
 
 # Verify wrapper loads cleanly
-python -c "import sys; sys.path.insert(0, r'C:\Users\sucot\.hermes'); import importlib.util, pathlib; p=pathlib.Path(r'C:\Users\sucot\.hermes\hermes-agent\tools\ddg_search_tool.py'); spec=importlib.util.spec_from_file_location('ddg_search_tool', p); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('loaded:', mod.__name__)"
+python -c "import sys, importlib.util, pathlib; p=pathlib.Path(r'C:\Users\sucot\.hermes\hermes-agent\tools\ddg_search_tool.py'); spec=importlib.util.spec_from_file_location('ddg_search_tool', p); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print('loaded:', mod.__name__)"
 
 # Compile backend modules
 python -m py_compile C:\Users\sucot\.hermes\plugins\web-tools\ddg\ddg_search.py
 python -m py_compile C:\Users\sucot\.hermes\plugins\web-tools\ddg\visit_website_enhanced.py
 python -m py_compile C:\Users\sucot\.hermes\hermes-agent\tools\ddg_search_tool.py
+
+# Smoke test full compose markdown pipeline
+python -c "import sys, importlib.util; sys.path.insert(0, r'C:\Users\sucot\.hermes'); reg = importlib.util.spec_from_file_location('tools.registry', r'C:\Users\sucot\.hermes\hermes-agent\tools\registry.py'); reg_mod=importlib.util.module_from_spec(reg); reg.loader.exec_module(reg_mod); sys.modules['tools.registry']=reg_mod; wrap = importlib.util.spec_from_file_location('ddg_search_tool.smoke', r'C:\Users\sucot\.hermes\hermes-agent\tools\ddg_search_tool.py'); wrap_mod=importlib.util.module_from_spec(wrap); wrap.loader.exec_module(wrap_mod); out=reg_mod.registry.get_entry('web_search_deep').handler({'query':'llama.cpp GGUF', 'validate':True, 'classify':True, 'max_validate':10, 'compose':True}); print(type(out).__name__); print(str(out)[:160])"
 ```
 
 ## Known blockers and workarounds
-1. `compose` module missing → exception if `compose=True`
-   - Workaround: wrapper exposes synthesis function directly; never pass `compose=True` until fixed.
-2. `image_search` not integrated into deep-research markdown output
-   - Workaround: call `image_search` explicitly from wrapper/pipeline manually.
-3. No fallback to native `web_search` on degraded/empty DDG results
-   - Workaround: monitor empty payload in wrapper; return `[]` and let agent fall back via tool call.
+1. `compose` module missing before wrapper load → resolved by wrapper-side conditional load of `compose.py`; backend continues to fall back if composition unavailable.
+2. Legacy backend path passed `compose=True` through to backend, causing import failure → wrapper now forces `compose=False` for backend call and performs markdown composition itself.
+3. No fallback to native `web_search` on degraded/empty DDG results → wrapper-side fallback implemented as `_safe_native_fallback`.
 4. `browser_dialog_tool.py` is a stub; do not rely on it.
-5. `_probe_gallery_urls` slow/unreliable; use trusted `image_results` when available.
+5. `image_search` requires DDG image/Jina pipeline; if degraded, explicit `image_search` tool remains available.
 
 ## Gotchas and pitfalls
 - Hermes tool registration depends on AST-visible `registry.register(...)` at top-level of wrapper module. Do not move calls inside conditionals or functions.
 - `visit_website_tool` name is hard-coded in wrapper register; changing the name requires matching agent prompts and skill references.
 - `ddg_search.py` was patched in-place; if Hermes update overwrites it, classifier may regress to domain-weighted mode. Verify after every DDG backend update.
-- `httpx` proxy workaround is version-sensitive (currently 0.28.1); upgrades may change exception types.
+- If backend code later introduces its own top-level `compose` import, wrapper-side preload ensures it doesn’t fail immediately. Remove the conditional preload once backend no longer imports compose.
+- `httpx` proxy workaround is version-sensitive; upgrades may change exception types.
 - `restore.ps1` expects PowerShell. On Git Bash / MSYS2, run explicitly via `powershell.exe -File ...`.
 - Do not create `plugins/web-tools/ddg/image_search.py`; the backend already exposes `image_search` in `ddg_search.py`. Duplicate module would shadow backend.
 
@@ -76,7 +83,6 @@ python -m py_compile C:\Users\sucot\.hermes\hermes-agent\tools\ddg_search_tool.p
 - Python: 3.11.11 (venv under `hermes-agent/venv`)
 - `httpx`/`curl_cffi` and `websockets.asyncio` used by backend modules
 - `ddgs` package assumed installed in Hermes venv
-- `compose` module is missing
 
 ## Recovery workflow
 1. Stop Hermes.
@@ -87,7 +93,7 @@ python -m py_compile C:\Users\sucot\.hermes\hermes-agent\tools\ddg_search_tool.p
    - `~/.hermes/CONTEXT.md`
 4. Run `py_compile` on each changed `.py`.
 5. Verify registry and `check_fn=True` for all three tools (see quick diagnostics).
-6. If `compose` module is restored, update `CONTEXT.md` status accordingly.
+6. Smoketest `web_search_deep` with `compose=True` via `registry.get_entry(...).handler(...)`.
 
 ## Risks and countermeasures
 - Loss of custom tools after Hermes update → mitigate: `restore.ps1`, `skills/restore-context/SKILL.md`, this `CONTEXT.md`.
@@ -96,12 +102,12 @@ python -m py_compile C:\Users\sucot\.hermes\hermes-agent\tools\ddg_search_tool.p
 - Breakage from schema drift → regenerate `check_fn` after any signature change in backend functions.
 
 ## Open plans
-1. Implement wrapper-side markdown synthesis for `compose` behavior, or restore `compose` module.
+1. Refine hot-path branch in `web_search_deep`: replace broad `from tools.web_search import web_search` fallback with explicit fallback contract that matches wrapper schema.
 2. Integrate `image_search` into `web_search_deep` output for structured research reports.
-3. Add automatic fallback to native `web_search` when DDG returns empty/degraded results.
-4. Replace `browser_dialog_tool.py` stub with full implementation or disable its discovery.
-5. Test end-to-end deep-research flow and refine category mapping based on real results.
+3. Replace `browser_dialog_tool.py` stub with full implementation or disable its discovery.
+4. Test end-to-end deep-research flow and refine category mapping based on real results.
 
 ## Decision log
 - Classifier fix: domain bonuses removed because authoritative-list maintenance is unbounded and breaks deep-research generality. Kept only keyword-baseline to avoid query-dependent regressions.
 - Wrapper design: single-file binding chosen over multi-file plugin to minimize breakage surface during Hermes updates. Direct `spec_from_file_location` chosen because relative/package-style imports fail after Hermes update reorders module paths.
+- `compose` handling: moved from backend-side import to wrapper-owned composition, with conditional fallback to existing `compose.py` when available. This preserves old backend behaviour without requiring `compose` at module-import time.

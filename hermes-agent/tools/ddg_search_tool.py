@@ -1,6 +1,6 @@
 """Direct registration for DuckDuckGo-based web tools living outside Hermes core.
 
-Loads `ddg_search.py` and `visit_website_enhanced.py`
+Loads `ddg_search.py`, `visit_website_enhanced.py`, and `compose.py`
 from `plugins/web-tools/ddg/` by path and exposes them through the native
 registry. No ``config.yaml`` edits are required.
 """
@@ -32,6 +32,11 @@ def _load_by_path(module_name: str, module_file: str):
 
 _search = _load_by_path("plugins.web_tools.ddg.ddg_search", "ddg_search.py")
 _visit = _load_by_path("plugins.web_tools.ddg.visit_website_enhanced", "visit_website_enhanced.py")
+_compose = _load_by_path("compose", "compose.py")
+
+# Ensure backend can import compose by name
+if _compose is not None and "compose" not in sys.modules:
+    sys.modules["compose"] = _compose
 
 search_deep = _search.search_deep if _search and hasattr(_search, "search_deep") else None
 visit_website_enhanced = (
@@ -49,10 +54,22 @@ def _safe_search_deep(query, validate=True, classify=True, max_validate=50, quer
         classify=classify,
         max_validate=max_validate,
         query_variants=query_variants,
+        compose=False,
     )
 
 
-def _build_markdown_answer(query, deep_result, include_images=True):
+def compose_markdown(query, deep_result, include_images=True):
+    if deep_result is None:
+        deep_result = {}
+    if _compose is not None and hasattr(_compose, "_build_markdown_answer"):
+        try:
+            return _compose._build_markdown_answer(query, deep_result, include_images=include_images)
+        except Exception as exc:
+            return f"# Deep search result\n\nQuery: {query}\n\nCompose failed: {exc}"
+    return _build_fallback_markdown(query, deep_result, include_images=include_images)
+
+
+def _build_fallback_markdown(query, deep_result, include_images=True):
     summary = deep_result.get("summary", {}) or {}
     results = deep_result.get("results", []) or []
     categories = deep_result.get("categories", {}) or {}
@@ -62,7 +79,7 @@ def _build_markdown_answer(query, deep_result, include_images=True):
         "",
         f"Query: {query}",
         "",
-        f"Raw: **{summary.get('raw_count', 0)}**, validated: **{summary.get('validated_count', 0)}**, alive: **{summary.get('alive_count', 0)}**",
+        f"Raw: **{summary.get('raw_count', summary.get('total_raw', 0))}**, validated: **{summary.get('validated_count', summary.get('validated', 0))}**, alive: **{summary.get('alive_count', summary.get('alive', 0))}**",
         "",
         "## Facts",
         "",
@@ -70,6 +87,8 @@ def _build_markdown_answer(query, deep_result, include_images=True):
     if not results:
         lines.append("- No validated sources")
     for item in results:
+        if not item.get("alive"):
+            continue
         title = (item.get("title") or "").strip() or "(no title)"
         body = (item.get("body") or item.get("text") or "").strip()
         snippet = body.splitlines()[0] if body else "(no description)"
@@ -81,8 +100,8 @@ def _build_markdown_answer(query, deep_result, include_images=True):
 
     lines += ["", "## Sources by category", ""]
     if categories:
-        for cat, count in sorted(categories.items(), key=lambda pair: pair[1], reverse=True):
-            lines.append(f"- {cat}: {count}")
+        for cat, items in sorted(categories.items(), key=lambda pair: len(pair[1]), reverse=True):
+            lines.append(f"- {cat}: {len(items)}")
     else:
         lines.append("- No categorized sources")
 
@@ -90,8 +109,10 @@ def _build_markdown_answer(query, deep_result, include_images=True):
         seen = set()
         images = []
         for item in results:
-            for entry in (item.get("images") or []):
-                url = (entry.get("url") or entry.get("image_url") or "").strip()
+            if not item.get("alive"):
+                continue
+            for entry in (item.get("image_urls") or item.get("images") or []):
+                url = (entry.get("url") or entry.get("image_url") or entry.get("src") or "").strip()
                 if not url or url in seen:
                     continue
                 images.append(((entry.get("alt") or entry.get("title") or "image").strip(), url))
@@ -107,6 +128,43 @@ def _build_markdown_answer(query, deep_result, include_images=True):
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _safe_native_fallback(query):
+    try:
+        from tools.web_search import web_search
+    except Exception:
+        return None
+
+    try:
+        payload = web_search(query, page=1, count=10, region="wt-wt", safe="moderate") or {}
+        results = [r for r in payload.get("results", []) if isinstance(r, dict)]
+        if not results:
+            return None
+
+        def _plain(r):
+            return {
+                "title": r.get("title") or "",
+                "url": r.get("url") or "",
+                "body": r.get("description") or r.get("snippet") or "",
+                "alive": True,
+            }
+
+        plain = [_plain(r) for r in results[:8]]
+        return {
+            "depth": "fallback",
+            "search_query": query,
+            "results": plain,
+            "summary": {
+                "total_raw": len(plain),
+                "validated": len(plain),
+                "alive": len(plain),
+                "validated_count": len(plain),
+                "alive_count": len(plain),
+            },
+        }
+    except Exception:
+        return None
 
 
 # --- Schemas (helpers, not registry calls) ---
@@ -126,6 +184,10 @@ def _schema_search_deep():
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional explicit query variants. If omitted, a built-in heuristic generates fallback variants.",
+                },
+                "compose": {
+                    "type": "boolean",
+                    "description": "Return composed Markdown answer instead of raw JSON. Deprecated on tool side; wrapper returns composed output when true.",
                 },
             },
             "required": ["query"],
@@ -172,12 +234,16 @@ registry.register(
     name="web_search_deep",
     toolset="web",
     schema=_schema_search_deep(),
-    handler=lambda args, **_: _safe_search_deep(
-        query=args.get("query", ""),
-        validate=args.get("validate", True),
-        classify=args.get("classify", True),
-        max_validate=int(args.get("max_validate", 50)),
-        query_variants=args.get("query_variants"),
+    handler=lambda args, **_: (lambda result: compose_markdown(args.get("query", ""), result) if args.get("compose") else result)(
+        _safe_search_deep(
+            query=args.get("query", ""),
+            validate=args.get("validate", True),
+            classify=args.get("classify", True),
+            max_validate=int(args.get("max_validate", 50)),
+            query_variants=args.get("query_variants"),
+        )
+        or _safe_native_fallback(args.get("query", ""))
+        or {"error": "search backend unavailable"}
     ),
     check_fn=lambda: search_deep is not None,
     emoji="🔎",
