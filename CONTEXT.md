@@ -38,18 +38,17 @@ repo:
 
 ## Included tool contracts
 - `web_search_deep` → original contract preserved: raw validated pages, classify=False, no compose.
-- `web_expand` → second-level expansion pass: accepts `query` + `source_urls`, calls `visit_website_enhanced` across each source, extracts normalized links, dedupes by redirect-normalized URL, ranks by anchor/title/url token overlap, returns ranked candidate list.
+- `web_expand_and_fetch` → second-level expansion + fetch: accepts `query` + `source_urls`, calls `visit_website_enhanced` across each candidate, returns fetched Level-2 pages for synthesis.
+- `web_deep_research` → composite tool: multi-query Level 1 → auto Level 2 if coverage insufficient → image search for visual topics → unified evidence pack.
 - `visit_website_tool` → unchanged enhanced fetcher contract.
 - `image_search` → unchanged ddg backend contract.
 
-## Expansion scoring
-- Candidate score = token overlap between query tokens (len>2, lowercase) and anchor text/href/path tokens.
-- Higher overlap → higher rank.
-- No keyword lists, categories, or domain authority adjustments.
-- If no new meaningful links found → empty candidates.
+## Auto-visual rule
+- For artist/art/visual topics, `web_deep_research` always triggers `image_search` and returns image URLs alongside page evidence.
+- `image_search` remains available as standalone tool for targeted visual queries.
 
-## Proxy handling
-- `visit_website_enhanced` keeps proxy optional; NECOBOX is an explicit local option only (`PROXY_URL`, `USE_PROXY`).
+## Registry/tool visibility (expected)
+- `web` toolset: `['image_search', 'visit_website_tool', 'web_expand_and_fetch', 'web_extract', 'web_search', 'web_search_deep', 'web_deep_research']`
 - By default `USE_PROXY=False` to avoid depending on local tunneller.
 - Proxy rotation is still managed by NECOBOX when enabled; if no NECOBOX, direct connection is used.
 - Critical: `curl_cffi` session path caches one session per proxy setting. If proxy env changes at runtime, restart Hermes.

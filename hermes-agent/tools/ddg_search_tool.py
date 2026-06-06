@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import sys
+import time
 from pathlib import Path
 
 from tools.registry import registry
@@ -148,7 +149,144 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
     }
 
 
-# --- Schemas (helpers, not registry calls) ---
+def _query_variants_wrapper(query):
+    """Return generated variants if module exists, else fallback."""
+    try:
+        from plugins.web_tools.ddg import query_variants
+        return query_variants.generate(query)
+    except Exception:
+        pass
+    base = [query]
+    tokens = [t for t in re.findall(r"\b\w+\b", query.lower()) if len(t) > 3]
+    if tokens:
+        base += [
+            f"{tokens[0]} history",
+            f"{tokens[0]} trends",
+            f"{tokens[0]} examples",
+            f"best {tokens[0]} resources",
+        ]
+    return base
+
+
+def _is_visual_topic(query: str) -> bool:
+    visual_signals = [
+        "artist", "art", "painting", "gallery", "museum", "photo", "image",
+        "pinup", "portrait", "illustration", "design", "fashion", "place",
+        "city", "landscape", "architecture", "person", "people", "model"
+    ]
+    q = query.lower()
+    return any(s in q for s in visual_signals)
+
+
+def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=5000):
+    """Composite deep research pipeline."""
+    if search_deep is None:
+        return {"error": "ddg backend unavailable"}
+
+    variants = _query_variants_wrapper(query)
+
+    seen_page = set()
+    pages = []
+    alive_count = 0
+    raw_count = 0
+    start = time.time()
+
+    for q in variants:
+        try:
+            out = search_deep(
+                q,
+                validate=True,
+                classify=False,
+                max_validate=max_validate,
+                query_variants=None,
+                compose=False,
+            )
+        except Exception:
+            continue
+        for r in out.get("results", []):
+            raw_count += 1
+            u = r.get("url")
+            if not u or u in seen_page:
+                continue
+            seen_page.add(u)
+            if r.get("alive"):
+                alive_count += 1
+            pages.append({
+                "url": u,
+                "title": r.get("title") or u,
+                "snippet": r.get("snippet") or "",
+                "text": (r.get("text") or r.get("snippet") or "")[:max_chars],
+                "alive": r.get("alive"),
+                "status": r.get("status"),
+                "source_query": q,
+            })
+
+    level1_time = round(time.time() - start, 2)
+
+    top_alive = [p["url"] for p in pages if p.get("alive")][:20]
+    need_expand = alive_count < 15 or not _is_coverage_sufficient(pages, query)
+    expand_items = []
+    if need_expand and top_alive:
+        expand_out = _safe_expand_and_fetch(
+            query=query,
+            source_urls=top_alive,
+            max_new_links=max_new_links,
+            max_chars=max_chars,
+        )
+        for item in expand_out.get("items", []):
+            u = item.get("url")
+            if u and u not in seen_page:
+                seen_page.add(u)
+                expand_items.append(item)
+                alive_count += 1
+
+    evidence = pages + expand_items
+
+    images = []
+    if _is_visual_topic(query) and image_search is not None:
+        try:
+            img_out = image_search(query)
+            for item in img_out.get("results", [])[:20]:
+                images.append({
+                    "url": item.get("url") or item.get("image_url") or item.get("url"),
+                    "title": item.get("title") or item.get("url"),
+                    "source": item.get("url"),
+                })
+        except Exception:
+            pass
+
+    return {
+        "query": query,
+        "variants_used": variants,
+        "panel": {
+            "raw": raw_count,
+            "alive": alive_count,
+            "level1": len(pages),
+            "level2": len(expand_items),
+            "images": len(images),
+            "level1_time": level1_time,
+        },
+        "pages": evidence,
+        "images": images,
+    }
+
+
+def _is_coverage_sufficient(pages, query):
+    terms = [t.lower() for t in re.findall(r"\b\w+\b", query.lower()) if len(t) > 3]
+    if not terms:
+        return True
+    term_hits = {t: 0 for t in terms}
+    for p in pages:
+        text = " ".join([
+            (p.get("title") or ""),
+            (p.get("text") or ""),
+        ]).lower()
+        for t in terms:
+            if t in text:
+                term_hits[t] += 1
+    covered = sum(1 for count in term_hits.values() if count >= 2)
+    return covered >= max(1, len(terms) // 2)
+
 
 def _schema_search_deep():
     return {
@@ -167,29 +305,6 @@ def _schema_search_deep():
                 },
             },
             "required": ["query"],
-        },
-    }
-
-
-def _schema_expand():
-    return {
-        "name": "web_expand",
-        "description": "Second-level deep research expansion. From alive Level-1 results, collect linked candidate URLs ranked by simple relevance to the query.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Original research query used to score relevance."},
-                "source_urls": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Alive pages from Level 1 to expand from.",
-                },
-                "max_new_links": {
-                    "type": "integer",
-                    "description": "Max second-level candidates to return.",
-                },
-            },
-            "required": ["query", "source_urls"],
         },
     }
 
@@ -250,7 +365,22 @@ def _schema_image_search():
     }
 
 
-# --- Registry calls (must be module-level for AST discovery) ---
+def _schema_deep_research():
+    return {
+        "name": "web_deep_research",
+        "description": "One-call deep research. Runs multi-query Level 1 search, auto-expands Level 2 if needed, collects images for visual topics, and returns unified evidence pack.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Research query."},
+                "max_validate": {"type": "integer", "description": "Max URLs to validate per query (default 200)."},
+                "max_new_links": {"type": "integer", "description": "Max Level-2 pages to fetch (default 20)."},
+                "max_chars": {"type": "integer", "description": "Text length cap per page (default 5000)."},
+            },
+            "required": ["query"],
+        },
+    }
+
 
 registry.register(
     name="web_search_deep",
@@ -264,20 +394,6 @@ registry.register(
     ),
     check_fn=lambda: search_deep is not None,
     emoji="🔎",
-    max_result_size_chars=20000,
-)
-
-registry.register(
-    name="web_expand",
-    toolset="web",
-    schema=_schema_expand(),
-    handler=lambda args, **_: _safe_expand(
-        source_urls=args.get("source_urls", []),
-        query=args.get("query", ""),
-        max_new_links=int(args.get("max_new_links", 25) or 25),
-    ),
-    check_fn=lambda: visit_website_enhanced is not None,
-    emoji="🔗",
     max_result_size_chars=20000,
 )
 
@@ -319,4 +435,19 @@ registry.register(
     check_fn=lambda: image_search is not None,
     emoji="🖼️",
     max_result_size_chars=20000,
+)
+
+registry.register(
+    name="web_deep_research",
+    toolset="web",
+    schema=_schema_deep_research(),
+    handler=lambda args, **_: _safe_deep_research(
+        query=args.get("query", ""),
+        max_validate=int(args.get("max_validate", 200) or 200),
+        max_new_links=int(args.get("max_new_links", 20) or 20),
+        max_chars=int(args.get("max_chars", 5000) or 5000),
+    ),
+    check_fn=lambda: search_deep is not None and visit_website_enhanced is not None,
+    emoji="🧠",
+    max_result_size_chars=60000,
 )
