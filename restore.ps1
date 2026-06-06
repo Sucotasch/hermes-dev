@@ -102,26 +102,35 @@ foreach ($f in $Files) {
 }
 
 # Basic compile checks
-$Py = $Venv
-if (-not (Test-Path $Py)) {
-    Log "WARNING: Python venv not found at $Py; skipping compile checks."
-} else {
-    $Targets = @(
-        (Join-Path $HermesHome 'plugins\web-tools\ddg\ddg_search.py'),
-        (Join-Path $HermesHome 'plugins\web-tools\ddg\visit_website_enhanced.py'),
-        (Join-Path $HermesHome 'hermes-agent\tools\ddg_search_tool.py')
-    )
-    foreach ($t in $Targets) {
-        if (-not (Test-Path $t)) { continue }
-        if ($DryRun) {
-            Log "DRY-RUN py_compile: $t"
-        } else {
-            $out = & $Py -m py_compile $t 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                Log "py_compile OK: $t"
+$HadFailure = $false
+$Targets = @(
+    @('plugins\web-tools\ddg\ddg_search.py', $false),
+    @('plugins\web-tools\ddg\visit_website_enhanced.py', $false),
+    @('hermes-agent\tools\ddg_search_tool.py', $false)
+)
+foreach ($t in $Targets) {
+    $rel = $t[0]
+    $path = Join-Path $HermesHome $rel
+    if (-not (Test-Path $path)) {
+        Log "MISSING target for compile check: $path"
+        $HadFailure = $true
+        continue
+    }
+    if ($DryRun) {
+        Log "DRY-RUN py_compile: $path"
+    } else {
+        try {
+            $pyOutput = & $Py -m py_compile $path 2>&1
+            $compileExit = $LASTEXITCODE
+            if ($compileExit -eq 0) {
+                Log "py_compile OK: $path"
             } else {
-                Log "py_compile FAILED: $t -> $out"
+                Log "py_compile FAILED: $path -> $pyOutput (exit $compileExit)"
+                $HadFailure = $true
             }
+        } catch {
+            Log "py_compile EXCEPTION: $path -> $_"
+            $HadFailure = $true
         }
     }
 }
@@ -134,8 +143,8 @@ $script:Log | Out-File $logFile -Encoding utf8
 Log "Log saved to $logFile"
 
 Log 'Restore finished.'
-if ($LASTEXITCODE -ne 0) {
-    Log "Warning: some steps failed. Review log: $logFile"
+if ($HadFailure) {
+    Log 'Warning: some steps failed. Review log: $logFile'
     exit 1
 }
 exit 0
