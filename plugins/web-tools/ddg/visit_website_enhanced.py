@@ -18,11 +18,14 @@ from bs4 import BeautifulSoup
 # curl_cffi imported lazily in _get_session to avoid circular import issues
 
 # ── Config ──────────────────────────────────────────────────────────────────
-USE_PROXY = True
+# Proxy is optional. Set USE_PROXY=False to bypass the local NECOBOX tunneller
+# and use a direct connection; when enabled, PROXY_URL must point to a reachable
+# HTTP CONNECT proxy. Proxy rotation is handled by NECOBOX itself.
+USE_PROXY = False
 PROXY_URL = "http://127.0.0.1:2080"
 JINA_URL = "https://r.jina.ai/"
 MAX_CHARS = 8000
-TIME_BETWEEN = 1.5
+TIME_BETWEEN = 1.25
 
 # ── curl_cffi impersonation ────────────────────────────────────────────────
 IMPERSONATE = "chrome124"

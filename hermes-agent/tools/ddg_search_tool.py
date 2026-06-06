@@ -52,6 +52,50 @@ def _safe_search_deep(query, validate=True, max_validate=200, query_variants=Non
         compose=False,
     )
 
+def _safe_expand(source_urls, query, max_new_links=25):
+    if not isinstance(source_urls, list):
+        source_urls = [source_urls]
+    if visit_website_enhanced is None:
+        return {"error": "visit_website_enhanced unavailable"}
+    def _norm(text):
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text).strip()
+    uniq = {}
+    query_terms = [t.lower() for t in re.findall(r"\b\w+\b", query.lower()) if len(t) > 2]
+    for url in source_urls:
+        try:
+            page = visit_website_enhanced(url)
+        except Exception:
+            continue
+        if not page:
+            continue
+        title = _norm(page.get("title") or "")
+        links = page.get("links") or []
+        for link in links:
+            href = (link or {}).get("url") if isinstance(link, dict) else None
+            if not href or href.startswith("javascript:") or href.startswith("mailto:"):
+                continue
+            if href.startswith("//"):
+                href = "https:" + href
+            if href in uniq:
+                continue
+            anchor = _norm((link or {}).get("text") if isinstance(link, dict) else "")
+            score = sum(1 for t in query_terms if t in anchor.lower() or t in href.lower())
+            uniq[href] = {
+                "url": href,
+                "anchor": anchor,
+                "source_title": title,
+                "score": score,
+            }
+    ranked = sorted(uniq.values(), key=lambda x: x["score"], reverse=True)[:max_new_links]
+    return {
+        "query": query,
+        "sources_count": len(source_urls),
+        "candidates": ranked,
+        "candidates_count": len(ranked),
+    }
+
 
 # --- Schemas (helpers, not registry calls) ---
 
@@ -87,6 +131,25 @@ def _schema_visit_website_tool():
                 "extract": {"type": "boolean", "description": "Return processed markdown when supported."},
             },
             "required": ["url"],
+        },
+    }
+
+def _schema_web_expand():
+    return {
+        "name": "web_expand",
+        "description": "Second-level deep-research expansion: from source URLs grow new candidate links ranked by query relevance. Returns ranked candidate URLs; caller validates and fetches them.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Original deep research query. Used only as relevance signal for candidates."},
+                "source_urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Source page URLs from first-level deep search.",
+                },
+                "max_new_links": {"type": "integer", "description": "Max candidate links per expansion call."},
+            },
+            "required": ["query", "source_urls"],
         },
     }
 
@@ -151,4 +214,18 @@ registry.register(
     ),
     check_fn=lambda: image_search is not None,
     emoji="🖼️",
+)
+
+registry.register(
+    name="web_expand",
+    toolset="web",
+    schema=_schema_web_expand(),
+    handler=lambda args, **_: _safe_expand(
+        source_urls=args.get("source_urls", []),
+        query=args.get("query", ""),
+        max_new_links=int(args.get("max_new_links", 25)),
+    ),
+    check_fn=lambda: visit_website_enhanced is not None,
+    emoji="🔗",
+    max_result_size_chars=20000,
 )
