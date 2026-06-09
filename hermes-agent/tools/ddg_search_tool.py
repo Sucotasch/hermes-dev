@@ -242,6 +242,10 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
 
     evidence = pages + expand_items
 
+    # Post-retrieval dedupe + source quotas (based on TinySearch chunk pool selection).
+    # Outcome: Jasper reducer for duplicated content and single-source bias.
+    evidence = _apply_post_retrieval_filter(evidence, query=query)
+
     images = []
     if _is_visual_topic(query) and image_search is not None:
         try:
@@ -269,6 +273,65 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
         "pages": evidence,
         "images": images,
     }
+
+
+def _apply_post_retrieval_filter(evidence, query):
+    """Apply Jaccard-based deduplication + per-source URL quotas to evidence pages."""
+
+    def _tokenize(text: str):
+        import re
+
+        return frozenset(re.findall(r"[a-zA-Z0-9_./:#-]+", (text or "").lower()))
+
+    def _jaccard(a, b):
+        if not a and not b:
+            return 1.0
+        if not a or not b:
+            return 0.0
+        inter = len(a & b)
+        union = len(a | b)
+        return inter / union if union else 0.0
+
+    final_limit = 40
+    max_per_source_url = 4
+    jaccard_threshold = 0.85
+
+    accepted = []
+    accepted_sets = []
+    source_counts = {}
+
+    def _selected_id(item):
+        return item.get("url") or id(item)
+
+    def _accept(item):
+        text = " ".join([item.get("title") or "", item.get("text") or "", item.get("snippet") or ""])
+        tokens = _tokenize(text)
+        if not tokens:
+            return any(
+                _selected_id(x) != _selected_id(item)
+                and " ".join([x.get("title") or "", x.get("text") or "", x.get("snippet") or ""]) == text
+                for x in accepted
+            )
+        worst = 0.0
+        for s in accepted_sets:
+            if s:
+                worst = max(worst, _jaccard(tokens, s))
+        return worst < jaccard_threshold
+
+    for item in evidence:
+        if len(accepted) >= final_limit:
+            break
+        url = item.get("url") or ""
+        if source_counts.get(url, 0) >= max_per_source_url:
+            continue
+        if not _accept(item):
+            continue
+        source_counts[url] = source_counts.get(url, 0) + 1
+        accepted.append(item)
+        text = " ".join([item.get("title") or "", item.get("text") or "", item.get("snippet") or ""])
+        accepted_sets.append(_tokenize(text))
+
+    return accepted
 
 
 def _is_coverage_sufficient(pages, query):

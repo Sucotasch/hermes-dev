@@ -125,10 +125,12 @@ After Level 1 (`web_search_deep`):
 - Breakage from proxy/httpx changes → keep wrapper path resolution stable; avoid changing backend module names/imports.
 - Breakage from schema drift → regenerate `check_fn` after any signature change in backend functions.
 
-## Open plans
-1. Replace `browser_dialog_tool.py` stub with full implementation or disable its discovery.
-2. Evaluate whether to make `query_variants` optional in backend or force wrapper-side only variants.
-3. Consider increasing backend `max_validate` cap once performance/coverage tradeoff is measured.
+## Open plans / current state
+1. `web_deep_research` composite tool implemented and registered as the primary routine deep research entrypoint.
+2. `web_expand` removed from wrapper code; `web_expand_and_fetch` retained as standalone Level-2 tool.
+3. Evidence selection and synthesis pipeline verified on pinup-art topic; curated evidence and rendered report saved under `~/.hermes_research/`.
+4. Post-retrieval Jaccard dedup + per-source URL quotas added to `web_deep_research` path from TinySearch chunk pool selection.
+5. Next optional step: migrate coverage rules into Python scoring helper to further reduce manual filtering.
 
 ## Decision log
 - Classification + on-tool markdown synthesis removed from wrapper-side `web_search_deep` to avoid AI-style template answers like unsatisfactory football-history output.
