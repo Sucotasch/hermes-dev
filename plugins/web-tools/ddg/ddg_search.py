@@ -1048,7 +1048,7 @@ _BOT_CHALLENGE_RE = re.compile(
     re.I,
 )
 _SHORT_PAGE_CHARS = 300
-
+_BOT_CHALLENGE_MARKER = "bot_challenge"
 
 
 def _tag_bot_challenge(items):
@@ -1208,7 +1208,8 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     start_time = time.time()
     
     # Step 1a: enforce backend-neutral behavior
-    
+    # Step 1: Multi-query collection (original + reformulations)
+    queries = [query]
     if query_variants:
         for q in query_variants:
             if isinstance(q, str) and q.strip():
