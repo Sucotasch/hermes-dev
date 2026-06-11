@@ -25,6 +25,11 @@ def _load_by_path(module_name: str, module_file: str):
     spec = importlib.util.spec_from_file_location(module_name, abs_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+    # Ensure the plugin's own directory is importable for intra-plugin imports
+    # (e.g. `ddg_search.py` -> `query_variants.py`)
+    plugin_dir = str(abs_path.parent)
+    if plugin_dir not in sys.path:
+        sys.path.insert(0, plugin_dir)
     try:
         spec.loader.exec_module(module)
     except Exception:
@@ -150,20 +155,22 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
 
 
 def _query_variants_wrapper(query):
-    """Return generated variants if module exists, else fallback."""
+    """Return generated variants; fall back to static heuristics if unavailable."""
     try:
-        from plugins.web_tools.ddg import query_variants
-        return query_variants.generate(query)
+        import query_variants
+        generated = query_variants.generate(query)
+        if generated:
+            return generated
     except Exception:
         pass
     base = [query]
-    tokens = [t for t in re.findall(r"\b\w+\b", query.lower()) if len(t) > 3]
+    tokens = [t for t in re.findall(r'\b\w+\b', query.lower()) if len(t) > 3]
     if tokens:
         base += [
-            f"{tokens[0]} history",
-            f"{tokens[0]} trends",
-            f"{tokens[0]} examples",
-            f"best {tokens[0]} resources",
+            f'{tokens[0]} history',
+            f'{tokens[0]} trends',
+            f'{tokens[0]} examples',
+            f'best {tokens[0]} resources',
         ]
     return base
 

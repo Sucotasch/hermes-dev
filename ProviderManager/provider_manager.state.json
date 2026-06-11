@@ -1,0 +1,10 @@
+{
+  "qwen": {
+    "running": false,
+    "retries": 0
+  },
+  "deepseek": {
+    "running": true,
+    "retries": 0
+  }
+}

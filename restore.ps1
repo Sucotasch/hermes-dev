@@ -65,7 +65,8 @@ Stop-HermesIfRunning
 
 # Backup current .hermes if requested
 if (-not $SkipBackup) {
-    $backupDir = New-TimestampDir -Base (Join-Path $HermesHome '.restore-backups')
+    $backupDirBase = Join-Path 'D:\Arx\Software Downloads\Hermes copy' 'Hermes_Backups'
+    $backupDir = New-TimestampDir -Base $backupDirBase
     Log "Backing up $HermesHome -> $backupDir"
     if (-not $DryRun) {
         Copy-Item $HermesHome $backupDir -Recurse -Force
@@ -74,14 +75,50 @@ if (-not $SkipBackup) {
     Log 'Skipping backup (SkipBackup).'
 }
 
+# Pre-backup changed skill files before overwrite (best-effort, non-fatal)
+$SkillFiles = @(
+    @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
+    @{ Repo = 'skills\web-deep-search\SKILL.md'; Dest = 'skills\web-deep-search\SKILL.md' }
+)
+
+foreach ($s in $SkillFiles) {
+    $src = Join-Path $RepoRoot $s.Repo
+    $dst = Join-Path $HermesHome $s.Dest
+    if (-not (Test-Path $dst) -or -not (Test-Path $src)) {
+        continue
+    }
+    try {
+        $srcHash = (Get-FileHash $src -Algorithm SHA1).Hash
+        $dstHash = (Get-FileHash $dst -Algorithm SHA1).Hash
+        if ($srcHash -ne $dstHash) {
+            $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+            $bakName = [IO.Path]::GetFileNameWithoutExtension($s.Dest) + ".pre-restore-$ts" + [IO.Path]::GetExtension($s.Dest)
+            $bakDir = Join-Path $HermesHome '.restore-log'
+            New-Item -Path $bakDir -ItemType Directory -Force | Out-Null
+            $bakPath = Join-Path $bakDir $bakName
+            Copy-Item $dst $bakPath -Force
+            Log "Skill pre-backup: $dst -> $bakPath"
+        }
+    } catch {
+        Log "Skill pre-backup skipped for $($s.Dest): $_"
+    }
+}
+
 # Copy files from repo to Hermes paths
 $Files = @(
-    @{ Repo = 'hermes-agent\tools\ddg_search_tool.py'; Dest = 'hermes-agent\tools\ddg_search_tool.py' },
-    @{ Repo = 'hermes-agent\tools\browser_dialog_tool.py'; Dest = 'hermes-agent\tools\browser_dialog_tool.py' },
-    @{ Repo = 'plugins\web-tools\ddg\ddg_search.py'; Dest = 'plugins\web-tools\ddg\ddg_search.py' },
-    @{ Repo = 'plugins\web-tools\ddg\visit_website_enhanced.py'; Dest = 'plugins\web-tools\ddg\visit_website_enhanced.py' },
-    @{ Repo = 'CONTEXT.md'; Dest = 'CONTEXT.md' },
+    @{ Repo = 'hermes-agent\tools\ddg_search_tool.py'; Dest = 'hermes-agent\tools\ddg_search_tool.py' }
+    @{ Repo = 'hermes-agent\tools\browser_dialog_tool.py'; Dest = 'hermes-agent\tools\browser_dialog_tool.py' }
+    @{ Repo = 'plugins\web-tools\ddg\ddg_search.py'; Dest = 'plugins\web-tools\ddg\ddg_search.py' }
+    @{ Repo = 'plugins\web-tools\ddg\visit_website_enhanced.py'; Dest = 'plugins\web-tools\ddg\visit_website_enhanced.py' }
+    @{ Repo = 'CONTEXT.md'; Dest = 'CONTEXT.md' }
     @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
+    @{ Repo = 'skills\web-deep-search\SKILL.md'; Dest = 'skills\web-deep-search\SKILL.md' }
+    @{ Repo = 'ProviderManager\provider_manager.py'; Dest = 'ProviderManager\provider_manager.py' }
+    @{ Repo = 'ProviderManager\gui.py'; Dest = 'ProviderManager\gui.py' }
+    @{ Repo = 'ProviderManager\hermes_provider_config.py'; Dest = 'ProviderManager\hermes_provider_config.py' }
+    @{ Repo = 'ProviderManager\watchdog.py'; Dest = 'ProviderManager\watchdog.py' }
+    @{ Repo = 'ProviderManager\provider_tool.py'; Dest = 'ProviderManager\provider_tool.py' }
+    @{ Repo = 'ProviderManager\launch_gui.py'; Dest = 'ProviderManager\launch_gui.py' }
 )
 
 foreach ($f in $Files) {
@@ -122,7 +159,7 @@ foreach ($t in $Targets) {
         Log "DRY-RUN py_compile: $path"
     } else {
         try {
-            $pyOutput = & $Py -m py_compile $path 2>&1
+            $pyOutput = & $Venv -m py_compile $path 2>&1
             $compileExit = $LASTEXITCODE
             if ($compileExit -eq 0) {
                 Log "py_compile OK: $path"
@@ -133,6 +170,42 @@ foreach ($t in $Targets) {
         } catch {
             Log "py_compile EXCEPTION: $path -> $_"
             $HadFailure = $true
+        }
+    }
+}
+
+# Post-restore smoke checks: compose contract (best-effort)
+if (-not $DryRun -and $HadFailure -eq $false) {
+    $Probe = Join-Path $HermesHome 'hermes-dev\deep_test_vargas.py'
+    if (-not (Test-Path $Probe)) {
+        $ProbeContent = @'
+import sys, json
+sys.path.insert(0, r'C:\Users\sucot\.hermes')
+sys.path.insert(0, r'C:\Users\sucot\.hermes\hermes-agent')
+sys.path.insert(0, r'C:\Users\sucot\.hermes\hermes-agent\tools')
+from tools.registry import discover_builtin_tools, registry
+discover_builtin_tools()
+entry = registry.get_entry('web_deep_research')
+out = entry.handler({'query':'Alberto Vargas pinup artist','max_validate':100,'max_new_links':20,'max_chars':3000,'compose':True})
+print(json.dumps({'output_type': type(out).__name__, 'compose_used': True}, ensure_ascii=False))
+'@
+        $ProbeDir = Split-Path $Probe -Parent
+        if (-not (Test-Path $ProbeDir)) {
+            New-Item -Path $ProbeDir -ItemType Directory -Force | Out-Null
+        }
+        Set-Content -Path $Probe -Value $ProbeContent -Encoding utf8
+    }
+    if (Test-Path $Probe) {
+        Log 'Running compose smoke probe...'
+        try {
+            $smoke = & $Venv $Probe 2>&1
+            $smokeExit = $LASTEXITCODE
+            Log "compose smoke probe exit: $smokeExit"
+            if ($smoke) {
+                Log "compose smoke probe output: $smoke"
+            }
+        } catch {
+            Log "compose smoke probe exception: $_"
         }
     }
 }

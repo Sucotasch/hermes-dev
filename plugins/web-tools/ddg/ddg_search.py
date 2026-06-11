@@ -12,9 +12,21 @@ Improvements over v2:
   ✅ bs4 + lxml парсинг — CSS-селекторы, XPath
 """
 
+import importlib.util
 import json, re, sys, time, random, os, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
+
+# Load adjacent query_variants helper once at import time to avoid per-call overhead
+_QUERY_VARIANTS_MODULE = None
+try:
+    _qv_path = os.path.join(os.path.dirname(__file__), 'query_variants.py')
+    _qv_spec = importlib.util.spec_from_file_location('query_variants', _qv_path)
+    _qv_module = importlib.util.module_from_spec(_qv_spec)
+    _qv_spec.loader.exec_module(_qv_module)
+    _QUERY_VARIANTS_MODULE = _qv_module
+except Exception:
+    pass
 
 # ── Config ──────────────────────────────────────────────────────────────────
 # Proxy detection order:
@@ -142,7 +154,12 @@ def _fetch(url, mode="document", referrer=None):
         "Cache-Control": "no-cache",
         "User-Agent": ua,
     }
-    
+
+    if isinstance(url, str):
+        host = urllib.parse.urlparse(url).hostname or ""
+        if host.startswith(("yandex.com", "yandex.ru", "yandex.net", "yandex.cloud")):
+            headers["Accept-Language"] = "ru-RU,ru;q=0.9"
+
     # Add Referer
     if referrer:
         headers["Referer"] = referrer
@@ -1025,6 +1042,31 @@ def _extract_image_urls(html, domain_base, max_count=3):
     return urls
 
 
+# ── Bot-challenge detection (soft Cloudflare/CAPTCHA pages) ──────────────
+_BOT_CHALLENGE_RE = re.compile(
+    r"(?:captcha|cloudflare|cloudflare-|are you a robot|are you not a robot|verify you are human|verify you are a human|verify your identity|checking your browser|attention required|access is denied|ddg verification|robot challenge|sorry, you have been blocked|please enable javascript)",
+    re.I,
+)
+_SHORT_PAGE_CHARS = 300
+
+
+
+def _tag_bot_challenge(items):
+    hits = 0
+    for item in items:
+        blob = " ".join([
+            item.get('title', ''),
+            item.get('snippet', ''),
+            item.get('text', ''),
+        ])
+        if _BOT_CHALLENGE_RE.search(blob):
+            item['status'] = _BOT_CHALLENGE_MARKER
+            item['alive'] = False
+            item['error'] = 'bot_challenge'
+            hits += 1
+    return hits
+
+
 def _check_url_live(url, timeout=10):
     """Check if a URL is alive and accessible.
 
@@ -1143,7 +1185,7 @@ def _relevance_score(query, title, body_text):
 
 def search_deep(query, validate=True, classify=True, max_validate=50,
                 timeout_per_url=10, output_format="json",
-                query_variants=None, compose=False):
+                query_variants=None, compose=False, query_type=None):
     """Deep search with URL validation and content classification.
     
     Parameters:
@@ -1156,6 +1198,7 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
         query_variants: list of alternative query strings (reformulations).
                        If None, only original query is used.
         compose: if True, return formatted markdown answer instead of JSON
+        query_type: agent-provided tag only; backend does not branch on it.
     
     Returns:
         dict with validated results, categories, and summary (or markdown string if compose=True)
@@ -1164,8 +1207,8 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     
     start_time = time.time()
     
-    # Step 1: Multi-query collection (original + reformulations)
-    queries = [query]
+    # Step 1a: enforce backend-neutral behavior
+    
     if query_variants:
         for q in query_variants:
             if isinstance(q, str) and q.strip():
@@ -1219,10 +1262,9 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
 
     raw_count = len(all_raw)
 
-    if not query_variants and raw_count < max_validate:
+    if not query_variants and raw_count < max_validate and _QUERY_VARIANTS_MODULE:
         try:
-            from query_variants import _suggest_query_variants as _suggest
-            suggested = _suggest(query, all_raw, max_variants=3)
+            suggested = _QUERY_VARIANTS_MODULE._suggest_query_variants(query, all_raw, max_variants=3)
             for q in suggested:
                 batch = web_search(q, page=1, count=40, region="wt-wt", safe="off").get("results", [])
                 for it in batch:
@@ -1314,9 +1356,10 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
 
             validated.append(res_out)
 
-    # ── Step 4: Sort by relevance (descending) ──
-    validated.sort(key=lambda r: r.get("relevance", 0), reverse=True)
-    
+    # Step 4: Soft bot-challenge tagging on validated items
+    _tag_bot_challenge(validated)
+    alive_count = sum(1 for r in validated if r.get('alive'))
+
     # ── Step 5: Categorize if requested ──
     categories = {}
     if classify:
