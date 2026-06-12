@@ -43,7 +43,9 @@ function New-TimestampDir {
     return $dir
 }
 
-$RepoRoot = 'D:\Arx\Software Downloads\Hermes copy\hermes-dev'
+$RepoRoot = $PSScriptRoot
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $RepoRoot) { $RepoRoot = Get-Location }
 $HermesHome = Join-Path $env:USERPROFILE '.hermes'
 
 if (-not (Test-Path $RepoRoot)) {
@@ -65,7 +67,7 @@ Stop-HermesIfRunning
 
 # Backup current .hermes if requested
 if (-not $SkipBackup) {
-    $backupDirBase = Join-Path 'D:\Arx\Software Downloads\Hermes copy' 'Hermes_Backups'
+    $backupDirBase = Join-Path (Split-Path -Parent $HermesHome) 'Hermes_Backups'
     $backupDir = New-TimestampDir -Base $backupDirBase
     Log "Backing up $HermesHome -> $backupDir"
     if (-not $DryRun) {
@@ -178,17 +180,17 @@ foreach ($t in $Targets) {
 if (-not $DryRun -and $HadFailure -eq $false) {
     $Probe = Join-Path $HermesHome 'hermes-dev\deep_test_vargas.py'
     if (-not (Test-Path $Probe)) {
-        $ProbeContent = @'
+        $ProbeContent = @"
 import sys, json
-sys.path.insert(0, r'C:\Users\sucot\.hermes')
-sys.path.insert(0, r'C:\Users\sucot\.hermes\hermes-agent')
-sys.path.insert(0, r'C:\Users\sucot\.hermes\hermes-agent\tools')
+sys.path.insert(0, r'$HermesHome')
+sys.path.insert(0, r'$HermesHome\hermes-agent')
+sys.path.insert(0, r'$HermesHome\hermes-agent\tools')
 from tools.registry import discover_builtin_tools, registry
 discover_builtin_tools()
 entry = registry.get_entry('web_deep_research')
 out = entry.handler({'query':'Alberto Vargas pinup artist','max_validate':100,'max_new_links':20,'max_chars':3000,'compose':True})
 print(json.dumps({'output_type': type(out).__name__, 'compose_used': True}, ensure_ascii=False))
-'@
+"@
         $ProbeDir = Split-Path $Probe -Parent
         if (-not (Test-Path $ProbeDir)) {
             New-Item -Path $ProbeDir -ItemType Directory -Force | Out-Null

@@ -2,15 +2,15 @@
 
 ## What this repo is
 
-This is **not** the main Hermes application. It's a deep research pipeline for network search, consisting of a skill (`skills/restore-context/SKILL.md`) and two tools (`ddg_search_tool.py` + `visit_website_enhanced.py`). Files here get restored into `C:\Users\sucot\.hermes\` via `restore.ps1`. Hermes updates regularly overwrite the live copy — this repo is the durable source of truth.
+This is **not** the main Hermes application. It's a deep research pipeline for network search, consisting of a skill (`skills/restore-context/SKILL.md`) and two tools (`ddg_search_tool.py` + `visit_website_enhanced.py`). Files here get restored into `~/.hermes/` via `restore.ps1`. Hermes updates regularly overwrite the live copy — this repo is the durable source of truth.
 
 ## Critical workflow: edit here, apply there
 
-1. Edit files in this repo (`D:\Arx\Software Downloads\Hermes copy\hermes-dev\`)
+1. Edit files in this repo
 2. `git add` + `git commit`
-3. Run restore to apply: `powershell.exe -File 'D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1'`
+3. Run restore to apply: `powershell.exe -File restore.ps1`
 4. Dry-run first: add `-DryRun -SkipBackup -NoStopHermes`
-5. Verify after restore: `python -m py_compile` on the three key files under `C:\Users\sucot\.hermes\`
+5. Verify after restore: `python -m py_compile` on the three key files under `~/.hermes/`
 
 **Never edit `~/.hermes\` custom files directly without mirroring back to this repo.**
 
@@ -18,8 +18,8 @@ This is **not** the main Hermes application. It's a deep research pipeline for n
 
 | Path | Role |
 |---|---|
-| `D:\...\hermes-dev\` (this repo) | Edit here. Version-controlled. |
-| `C:\Users\sucot\.hermes\` | Live runtime. Gets overwritten by Hermes updates. |
+| This repo (wherever cloned) | Edit here. Version-controlled. |
+| `~/.hermes/` | Live runtime. Gets overwritten by Hermes updates. |
 
 ## Running tests
 

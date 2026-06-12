@@ -4,11 +4,11 @@
 Maintain a stable, recoverable deep-research integration for Hermes custom DDG tools, resilient to Hermes updates/context resets. Intent policy is now LLM-driven via `query_type`; code is monotone and does not branch on topic/visual/coverage keywords.
 
 ## Source of truth repo
-Path: `D:\Arx\Software Downloads\Hermes copy\hermes-dev`
+Path: this repo (wherever cloned to). Restored via `restore.ps1` which auto-detects its own location.
 
 | Rule | Rationale |
 |---|---|
-| This repo stores custom files that must be restored into `C:\Users\sucot\.hermes\` after any breakage. | Hermes updates/context resets regularly destroy progress. |
+| This repo stores custom files that must be restored into `~/.hermes/` after any breakage. | Hermes updates/context resets regularly destroy progress. |
 | Keep changes granular: one logical fix per commit with factual background. | Easier revert/audit. |
 | Before editing, git status and inspect. Commit only after verified state change. | Prevents phantom changes. |
 | Update this file after every confirmed fix or plan change. | CONTEXT.md is the durable memory. |
