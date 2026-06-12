@@ -26,9 +26,43 @@ User query
 
 ## Setup
 
-1. Python 3.11.11 with venv at `hermes-agent/venv`
-2. Install dependencies: `pip install httpx curl_cffi ddgs beautifulsoup4 lxml`
-3. Run restore: `powershell.exe -File restore.ps1`
+### Requirements
+- Python 3.11+ (any machine)
+- Hermes Agent installed (`~/.hermes/` exists)
+- PowerShell (for restore.ps1) or manual file copy
+
+### Install dependencies
+```bash
+pip install httpx curl_cffi ddgs beautifulsoup4 lxml
+```
+
+### Deploy to Hermes
+```bash
+# Clone repo anywhere
+git clone <repo-url> hermes-dev
+cd hermes-dev
+
+# Auto-restore (detects repo location and ~/.hermes/ automatically)
+powershell.exe -File restore.ps1
+
+# Dry-run first (safe, no changes)
+powershell.exe -File restore.ps1 -DryRun -SkipBackup -NoStopHermes
+```
+
+On Linux/macOS (no PowerShell): copy files manually:
+```bash
+cp hermes-agent/tools/ddg_search_tool.py ~/.hermes/hermes-agent/tools/
+cp plugins/web-tools/ddg/*.py ~/.hermes/plugins/web-tools/ddg/
+cp skills/web-deep-search/SKILL.md ~/.hermes/skills/web-deep-search/
+cp CONTEXT.md ~/.hermes/
+```
+
+### Verify after deploy
+```bash
+python -m py_compile ~/.hermes/plugins/web-tools/ddg/ddg_search.py
+python -m py_compile ~/.hermes/plugins/web-tools/ddg/visit_website_enhanced.py
+python -m py_compile ~/.hermes/hermes-agent/tools/ddg_search_tool.py
+```
 
 ## Key Commands
 
