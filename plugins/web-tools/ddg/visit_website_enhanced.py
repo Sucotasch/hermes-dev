@@ -27,6 +27,7 @@ MAX_CHARS = 8000
 TIME_BETWEEN = 1.25
 
 # ── curl_cffi impersonation ────────────────────────────────────────────────
+IMPERSONATE_POOL = ["chrome110", "chrome116", "chrome120", "chrome124"]
 IMPERSONATE = "chrome124"
 
 # ── UA Pool (expanded) ─────────────────────────────────────────────────────
@@ -65,13 +66,14 @@ def _throttle():
 _sessions = {}
 
 def _get_session():
-    """Get or create a curl_cffi Session with Chrome fingerprint."""
-    key = PROXY_URL
+    """Get or create a curl_cffi Session with rotating Chrome fingerprint."""
+    imp = random.choice(IMPERSONATE_POOL)
+    key = (PROXY_URL, imp)
     if key not in _sessions:
         try:
             import curl_cffi
             sess = curl_cffi.requests.Session(
-                impersonate=IMPERSONATE,
+                impersonate=imp,
                 proxies={"http": PROXY_URL, "https": PROXY_URL} if USE_PROXY else None,
                 verify=False,
                 timeout=25,
@@ -131,16 +133,22 @@ def _fetch(url, referrer=None, cookies=None):
     if session:
         for attempt in range(3):
             try:
+                # Rotate UA on each retry attempt
+                if attempt > 0:
+                    extra_headers["User-Agent"] = random.choice(UA_POOL)
                 resp = session.get(url, headers=extra_headers, allow_redirects=True)
                 html = resp.text
                 
                 if html and len(html) > 100 and not _is_blocked(html):
                     return html
                 
-                # Blocked or invalid — wait and retry with different UA
+                # Blocked or invalid — wait and retry
                 time.sleep(1.5 + random.uniform(0, 0.5))
                 
             except Exception as e:
+                # DNS circuit breaker: don't retry on DNS failures
+                if "getaddrinfo" in str(e).lower() or "name or service not known" in str(e).lower():
+                    break
                 time.sleep(2)
         
         # ── Fallback: httpx ──
@@ -153,7 +161,11 @@ def _fetch_httpx(url, headers):
     """Fallback: httpx for HTTP/2 support."""
     try:
         import httpx
-        with httpx.Client(http2=True, follow_redirects=True, timeout=15) as client:
+        proxy = PROXY_URL if USE_PROXY and PROXY_URL else None
+        kwargs = {"http2": True, "follow_redirects": True, "timeout": 15}
+        if proxy:
+            kwargs["proxy"] = proxy
+        with httpx.Client(**kwargs) as client:
             resp = client.get(url, headers=headers)
             if resp.text and len(resp.text) > 100:
                 return resp.text
@@ -216,6 +228,10 @@ def _is_blocked(html):
         ('attention required', 'attention_required'),
         ('turn on javascript', 'js_required'),
         ('enable cookies', 'cookies_required'),
+        ('javascript is disabled', 'js_required'),
+        ('enable javascript and then reload', 'js_required'),
+        ('you need to enable javascript', 'js_required'),
+        ('requires javascript', 'js_required'),
     ]
     
     for pattern, block_type in blocks:
@@ -240,32 +256,58 @@ def _get_block_type(html):
     return 'unknown'
 
 def _strip_block_overlay(html):
-    """Strip overlay/modals from the page (age-gates, cookie consent, popups) using bs4."""
+    """Strip overlay/modals from the page (age-gates, cookie consent, popups)."""
     if not html:
         return html
-    
+
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
-    
-    # Remove overlay elements
-    for tag_name in ["div", "section", "article"]:
+
+    OVERLAY_IDS = {"age-gate", "age_gate", "cookie-consent", "cookie-banner",
+                   "consent-dialog", "gdpr-modal", "ccpa-banner", "privacy-banner"}
+    OVERLAY_CLASSES = {"overlay", "modal", "popup", "dialog", "lightbox",
+                       "banner", "cookie", "consent", "privacy", "age-gate",
+                       "age_gate", "gdpr", "ccpa"}
+    TEXT_PATTERNS = ["are you over 18", "are you 18", "age verification",
+                     "accept all cookies", "accept cookies", "we use cookies",
+                     "i agree", "i accept", "continue to site",
+                     "verify you are", "confirm you are"]
+    BUTTON_TEXTS = {"accept all", "i agree", "i accept", "accept cookies",
+                    "allow all", "continue", "got it", "ok"}
+
+    for tag_name in ["div", "section", "article", "aside", "header", "footer"]:
         for el in soup.find_all(tag_name):
             try:
-                cls = el.get("class") or []
-                if any(k in cls for k in ["overlay", "modal", "popup", "dialog", "lightbox",
-                                            "banner", "cookie", "consent", "privacy",
-                                            "age-gate", "age_gate", "gdpr", "ccpa"]):
+                el_id = (el.get("id") or "").lower()
+                el_cls = [c.lower() for c in (el.get("class") or [])]
+                el_text = el.get_text(" ", strip=True).lower()[:200]
+
+                if any(k in el_id for k in OVERLAY_IDS):
                     el.decompose()
+                    continue
+                if any(k in el_cls for k in OVERLAY_CLASSES):
+                    el.decompose()
+                    continue
+                if any(p in el_text for p in TEXT_PATTERNS):
+                    el.decompose()
+                    continue
             except (AttributeError, TypeError):
                 pass
-    
-    # Also remove script/style tags
+
+    for btn in soup.find_all(["button", "a"]):
+        try:
+            btn_text = btn.get_text(strip=True).lower()
+            if btn_text in BUTTON_TEXTS:
+                btn.decompose()
+        except (AttributeError, TypeError):
+            pass
+
     for tag_name in ["script", "style"]:
         for el in soup.find_all(tag_name):
             el.decompose()
-    
+
     return str(soup)
 
 def _is_valid_content(html):
@@ -337,6 +379,143 @@ class _ContentParser:
         
         return self
 
+# ── JS data extraction from <script> tags ───────────────────────────────────
+_SCRIPT_DATA_PATTERNS = [
+    re.compile(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S),
+    re.compile(r'<script[^>]*>\s*window\.__[A-Z_]+\s*=\s*(\{.*?\})\s*;?\s*</script>', re.S),
+    re.compile(r'<script\s+type="application/ld\+json"[^>]*>(.*?)</script>', re.S),
+    re.compile(r'data-react-props="([^"]+)"'),
+]
+
+
+def extract_js_data(html):
+    """Extract structured data from <script> tags (SSR data, JSON-LD, etc.)."""
+    if not html:
+        return {}
+    data = {}
+    for pattern in _SCRIPT_DATA_PATTERNS:
+        for match in pattern.finditer(html):
+            raw = match.group(1).strip()
+            if not raw or len(raw) < 5:
+                continue
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    tag = match.group(0)
+                    if "__NEXT_DATA__" in tag:
+                        data["next_data"] = parsed
+                    elif "ld+json" in tag:
+                        data.setdefault("json_ld", []).append(parsed)
+                    else:
+                        data.update(parsed)
+            except (json.JSONDecodeError, ValueError):
+                pass
+    return data
+
+
+# ── Full-size image extraction ──────────────────────────────────────────────
+_TRACKING_IMG_RE = re.compile(r'(?:pixel|track|1x1|spacer|blank|clear\.gif|analytics|badge|doubleclick|gstatic)', re.I)
+
+
+def upgrade_to_fullsize(url):
+    """Try common patterns to upgrade a thumbnail URL to full-size."""
+    if not url:
+        return url
+    original = url
+    url = re.sub(r'-(?:\d+x\d+|small|thumb|medium|preview|thumbnail|scaled|crop|resize)(\.\w{3,4})$', r'\1', url, flags=re.I)
+    url = re.sub(r'_(?:s|m|n|q|t|sq)(\.(?:jpg|jpeg|png|webp|gif))$', r'_b\1', url, flags=re.I)
+    url = re.sub(r'/(?:thumbs|thumb|preview|small|medium|thumbnail|crop|resize)/', '/', url)
+    url = re.sub(r'^https?://t\.', 'https://i.', url)
+    url = re.sub(r'^https?://thumbnails\.', 'https://images.', url)
+    url = re.sub(r'^https?://thumb\.', 'https://cdn.', url)
+    url = re.sub(r'[?&](?:w|h|width|height|size|dim|quality|q)=\d+', '', url)
+    url = re.sub(r'\?$', '', url)
+    return url if url != original else original
+
+
+def extract_fullsize_images(html, base_url=""):
+    """Extract full-size image URLs from page HTML using common patterns."""
+    if not html:
+        return []
+    urls = []
+    parsed_base = urllib.parse.urlparse(base_url) if base_url else None
+
+    for m in re.finditer(r'<meta[^>]+(?:property|name)="og:image"[^>]+content="([^"]+)"', html, re.I):
+        urls.append(m.group(1))
+    for m in re.finditer(r'<meta[^>]+content="([^"]+)"[^>]+(?:property|name)="og:image"', html, re.I):
+        urls.append(m.group(1))
+
+    for m in re.finditer(r'<a[^>]+href="([^"]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"]*)?)"[^>]*>\s*<img', html, re.I):
+        urls.append(m.group(1))
+
+    for m in re.finditer(r'srcset="([^"]+)"', html, re.I):
+        parts = m.group(1).split(',')
+        best_url, best_w = "", 0
+        for part in parts:
+            part = part.strip()
+            tokens = part.split()
+            if not tokens:
+                continue
+            w_match = re.search(r'(\d+)w', part)
+            w = int(w_match.group(1)) if w_match else 0
+            if w > best_w:
+                best_w = w
+                best_url = tokens[0]
+        if best_url:
+            urls.append(best_url)
+
+    for m in re.finditer(r'data-(?:original|lazy-src|full-src|hi-res-src)="([^"]+)"', html, re.I):
+        urls.append(m.group(1))
+
+    for m in re.finditer(r'"image"\s*:\s*"(https?://[^"]+)"', html):
+        urls.append(m.group(1))
+
+    for m in re.finditer(r'<figure[^>]*>\s*<a[^>]+href="([^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"', html, re.I):
+        urls.append(m.group(1))
+
+    seen = set()
+    resolved = []
+    for url in urls:
+        url = url.strip()
+        if not url:
+            continue
+        if url.startswith("//"):
+            url = "https:" + url
+        elif url.startswith("/") and parsed_base:
+            url = "%s://%s%s" % (parsed_base.scheme, parsed_base.netloc, url)
+        if url in seen:
+            continue
+        seen.add(url)
+        if _TRACKING_IMG_RE.search(url):
+            continue
+        url = upgrade_to_fullsize(url)
+        resolved.append(url)
+
+    # Fallback: regular <img> tags with size hints (if few results so far)
+    if len(resolved) < 5:
+        for m in re.finditer(r'<img[^>]+src="([^"]+)"[^>]*>', html, re.I):
+            img_url = m.group(1)
+            tag = m.group(0)
+            if img_url.startswith("//"):
+                img_url = "https:" + img_url
+            elif img_url.startswith("/") and parsed_base:
+                img_url = "%s://%s%s" % (parsed_base.scheme, parsed_base.netloc, img_url)
+            if img_url in seen or not img_url.startswith("http"):
+                continue
+            w = re.search(r'width="(\d+)"', tag, re.I)
+            h = re.search(r'height="(\d+)"', tag, re.I)
+            if (w and int(w.group(1)) < 50) or (h and int(h.group(1)) < 50):
+                continue
+            if _TRACKING_IMG_RE.search(img_url):
+                continue
+            seen.add(img_url)
+            resolved.append(img_url)
+            if len(resolved) >= 20:
+                break
+
+    return resolved[:20]
+
+
 # ── Visit with full bypass ─────────────────────────────────────────────────
 def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_images=20):
     """
@@ -382,8 +561,12 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
     # ── Step 4: Extract text ──
     text = re.sub(r'<[^>]+>', ' ', html)
     text = re.sub(r'\s+', ' ', text).strip()[:max_chars]
-    
-    return {
+
+    # Extract full-size images and JS data (zero-cost: already have HTML)
+    fullsize = extract_fullsize_images(html, url)
+    js_data = extract_js_data(html)
+
+    result = {
         "title": parser.title,
         "headings": parser.headings,
         "links": parser.links[:max_links],
@@ -392,6 +575,11 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
         "source": source,
         "url": url,
     }
+    if fullsize:
+        result["fullsize_images"] = fullsize
+    if js_data:
+        result["js_data"] = js_data
+    return result
 
 # ── CLI Entry Point ────────────────────────────────────────────────────────
 if __name__ == "__main__":

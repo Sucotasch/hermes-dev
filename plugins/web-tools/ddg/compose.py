@@ -62,7 +62,7 @@ def _clean_fact(text: str) -> str:
 
 _DATE_RE = re.compile(r'\b(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4})\b')
 _PHONE_RE = re.compile(r'\+?\d[\d\s\-\(\)]{7,}\d')
-_varenik_QUOTE_RE = re.compile(r'[\"\«\»]([^\"\«\»]{3,120})[\"\»\"]')
+_QUOTE_RE = re.compile(r'[\"\«\»]([^\"\«\»]{3,120})[\"\»\"]')
 _MARKERS = {
     'error': re.compile(r'(?:ошиб(?:ка|ки|ок)|error|fault|code\s+\w+|fail(?:ed|ure)?)', re.I),
     'cause': re.compile(r'(?:причин(?:а|ы|ой)|cause|because|из-за|due to|since|поскольку)', re.I),
@@ -87,7 +87,7 @@ def _score_sentence(sentence, query):
         score += 0.1
     if _PHONE_RE.search(s):
         score += 0.05
-    if _varenik_QUOTE_RE.search(s):
+    if _QUOTE_RE.search(s):
         score += 0.05
     return min(score, 1.0)
 

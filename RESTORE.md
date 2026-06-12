@@ -15,6 +15,7 @@ Production-grade recovery kit for Hermes custom DDG integration. Used when Herme
 - `plugins/web-tools/ddg/visit_website_enhanced.py`
 - `CONTEXT.md`
 - `skills/restore-context/SKILL.md`
+- `skills/web-deep-search/SKILL.md`
 
 ## Quick recovery
 Run this to restore custom tools and context:
@@ -42,6 +43,7 @@ python -m py_compile hermes-agent\tools\ddg_search_tool.py
 3. Run restore.ps1 to apply
 
 ## Last known state
-Date: 2026-06-06  
+Date: 2026-06-12  
 State: `web_search_deep` working, `visit_website_tool` working, `image_search` working.  
-Classifier uses keyword-only logic; authoritative-domain list removed.
+All anti-bot fixes applied: impersonation rotation, DNS circuit breaker, proxy retry, JS-block detection, content relevance scoring, domain blocklist, full-size image extraction, overlay bypass expansion.  
+Skill cleaned: 776 → 706 lines, 7 duplicates removed.

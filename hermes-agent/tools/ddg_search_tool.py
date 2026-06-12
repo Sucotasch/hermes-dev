@@ -47,7 +47,7 @@ visit_website_enhanced = (
 image_search = _search.image_search if _search and hasattr(_search, "image_search") else None
 
 
-def _safe_search_deep(query, validate=True, max_validate=200, query_variants=None):
+def _safe_search_deep(query, validate=True, max_validate=200, query_variants=None, query_type=None):
     if search_deep is None:
         return {"error": "ddg backend unavailable"}
     return search_deep(
@@ -57,6 +57,7 @@ def _safe_search_deep(query, validate=True, max_validate=200, query_variants=Non
         max_validate=max_validate,
         query_variants=query_variants,
         compose=False,
+        query_type=query_type,
     )
 
 
@@ -175,17 +176,7 @@ def _query_variants_wrapper(query):
     return base
 
 
-def _is_visual_topic(query: str) -> bool:
-    visual_signals = [
-        "artist", "art", "painting", "gallery", "museum", "photo", "image",
-        "pinup", "portrait", "illustration", "design", "fashion", "place",
-        "city", "landscape", "architecture", "person", "people", "model"
-    ]
-    q = query.lower()
-    return any(s in q for s in visual_signals)
-
-
-def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=5000):
+def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=5000, query_type=None):
     """Composite deep research pipeline."""
     if search_deep is None:
         return {"error": "ddg backend unavailable"}
@@ -254,7 +245,7 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
     evidence = _apply_post_retrieval_filter(evidence, query=query)
 
     images = []
-    if _is_visual_topic(query) and image_search is not None:
+    if query_type == "visual" and image_search is not None:
         try:
             img_out = image_search(query)
             for item in img_out.get("results", [])[:20]:
@@ -299,7 +290,7 @@ def _apply_post_retrieval_filter(evidence, query):
         union = len(a | b)
         return inter / union if union else 0.0
 
-    final_limit = 40
+    final_limit = 80
     max_per_source_url = 4
     jaccard_threshold = 0.85
 
@@ -372,6 +363,11 @@ def _schema_search_deep():
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional explicit query variants.",
+                },
+                "query_type": {
+                    "type": "string",
+                    "enum": ["visual", "technical", "news", "historical", "comparison", "general"],
+                    "description": "Agent-decided intent label. Backend does not branch on it.",
                 },
             },
             "required": ["query"],
@@ -446,6 +442,11 @@ def _schema_deep_research():
                 "max_validate": {"type": "integer", "description": "Max URLs to validate per query (default 200)."},
                 "max_new_links": {"type": "integer", "description": "Max Level-2 pages to fetch (default 20)."},
                 "max_chars": {"type": "integer", "description": "Text length cap per page (default 5000)."},
+                "query_type": {
+                    "type": "string",
+                    "enum": ["visual", "technical", "news", "historical", "comparison", "general"],
+                    "description": "Agent-decided intent label. Controls image search routing.",
+                },
             },
             "required": ["query"],
         },
@@ -461,6 +462,7 @@ registry.register(
         validate=args.get("validate", True),
         max_validate=int(args.get("max_validate", 200) or 200),
         query_variants=args.get("query_variants"),
+        query_type=args.get("query_type"),
     ),
     check_fn=lambda: search_deep is not None,
     emoji="🔎",
@@ -516,6 +518,7 @@ registry.register(
         max_validate=int(args.get("max_validate", 200) or 200),
         max_new_links=int(args.get("max_new_links", 20) or 20),
         max_chars=int(args.get("max_chars", 5000) or 5000),
+        query_type=args.get("query_type"),
     ),
     check_fn=lambda: search_deep is not None and visit_website_enhanced is not None,
     emoji="🧠",

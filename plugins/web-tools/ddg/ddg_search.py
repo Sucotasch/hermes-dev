@@ -45,7 +45,8 @@ MAX_CHARS = 8000
 TIME_BETWEEN = 1.5  # Reduced because curl_cffi is faster
 
 # ── curl_cffi impersonation versions ────────────────────────────────────────
-# Chrome 120-125 are current and well-supported by curl_cffi
+# Rotate between supported Chrome versions to vary TLS fingerprint
+IMPERSONATE_POOL = ["chrome110", "chrome116", "chrome120", "chrome124"]
 IMPERSONATE = "chrome124"
 
 # ── UA Pool ─────────────────────────────────────────────────────────────────
@@ -88,18 +89,19 @@ def _throttle():
 _sessions = {}
 
 def _get_session(domain=None):
-    """Get or create a curl_cffi Session with Chrome fingerprint."""
+    """Get or create a curl_cffi Session with rotating Chrome fingerprint."""
     import curl_cffi
     
-    # Key by proxy + impersonate (no domain-specific needed, cookies shared)
-    key = PROXY_URL
+    # Rotate impersonation to vary TLS fingerprint across sessions
+    imp = random.choice(IMPERSONATE_POOL)
+    # Key by proxy + impersonate
+    key = (PROXY_URL, imp)
     if key not in _sessions:
         try:
-            # Chrome 124 impersonation — TLS fingerprint matches real Chrome (HTTP/2 auto-enabled)
             sess = curl_cffi.requests.Session(
-                 impersonate=IMPERSONATE,
+                 impersonate=imp,
                  proxies={"http": PROXY_URL, "https": PROXY_URL} if USE_PROXY else None,
-                 verify=False,  # Allow self-signed certs for debugging
+                 verify=False,
                  timeout=8 if USE_PROXY else 15,
              )
             _sessions[key] = sess
@@ -176,13 +178,16 @@ def _fetch(url, mode="document", referrer=None):
     if session:
         for attempt in range(3):
             try:
+                # Rotate UA on each retry attempt
+                if attempt > 0:
+                    headers["User-Agent"] = _random_ua()
                 resp = session.get(url, headers=headers, allow_redirects=True)
                 html = resp.text
                 
                 if html and not _detect_blocked(html) and _is_valid_content(html):
                     return html
                 
-                # Blocked or invalid — wait and retry with different UA
+                # Blocked or invalid — wait and retry
                 time.sleep(1.5 + random.uniform(0, 0.5))
                 
             except Exception as e:
@@ -198,8 +203,11 @@ def _fetch_httpx(url, headers):
     """Fallback: httpx for HTTP/2 support."""
     try:
         import httpx
-        proxies = {"http://": PROXY_URL, "https://": PROXY_URL} if USE_PROXY and PROXY_URL else None
-        with httpx.Client(http2=True, follow_redirects=True, timeout=15, proxies=proxies) as client:
+        proxy = PROXY_URL if USE_PROXY and PROXY_URL else None
+        kwargs = {"http2": True, "follow_redirects": True, "timeout": 15}
+        if proxy:
+            kwargs["proxy"] = proxy
+        with httpx.Client(**kwargs) as client:
             resp = client.get(url, headers=headers)
             if resp.text and not _detect_blocked(resp.text) and _is_valid_content(resp.text):
                 return resp.text
@@ -245,6 +253,8 @@ def _detect_blocked(html):
         'browser left', 'attention required',
         'anomaly-detected', 'perimeterx', 'px-captcha',
         'turn on javascript', 'enable cookies',
+        'javascript is disabled', 'enable javascript and then reload',
+        'you need to enable javascript', 'requires javascript',
     ]
     for ind in block_indicators:
         if ind in html_lower:
@@ -330,32 +340,13 @@ def _parse_bing_images(html):
 
 
 def image_search(query, page=1, count=10, region="wt-wt", safe="moderate"):
-    """Search images via Jina → Bing (replaces broken DDG i.js).
+    """Search images via Jina -> Bing (replaces broken DDG i.js).
     
     Strategy:
     1. Jina fetches Bing image search HTML
     2. Extract thumbnail URLs and page URLs from Bing HTML
     """
     try:
-        # Get vqd from DDG first (for Bing redirect)
-        initial_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}&kl={region}"
-        sess = _get_session()
-        if not sess:
-            return {"error": "No curl_cffi session available", "results": []}
-        
-        resp = sess.get(initial_url, headers={
-            "User-Agent": _random_ua(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-        })
-        
-        if not resp.text:
-            return image_fallback(query, count)
-        
-        vqd = re.search(r"vqd=([\d-]+)", resp.text)
-        if not vqd:
-            return image_fallback(query, count)
-        vqd_token = vqd.group(1)
-        
         # Use Jina to fetch Bing image search
         jina_url = f"https://r.jina.ai/https://www.bing.com/images/search?q={urllib.parse.quote(query)}&qft=+filterui:images-16by9"
         jina_html = _fetch(jina_url, "document")
@@ -496,7 +487,12 @@ def web_search(query, page=1, count=5, region="wt-wt", safe="auto"):
         try:
             result = strategy()
         except Exception as exc:
+            exc_str = str(exc).lower()
             print(f"[ddg-search] Strategy '{name}' failed: {exc}", file=sys.stderr)
+            # DNS circuit breaker: if DNS fails, skip remaining network-dependent strategies
+            if "getaddrinfo" in exc_str or "name or service not known" in exc_str:
+                print(f"[ddg-search] DNS failure detected, skipping remaining strategies", file=sys.stderr)
+                break
             continue
         if result and result.get("results"):
             result["_source"] = name
@@ -823,15 +819,15 @@ def _get_block_type(html):
     
     if 'cf-chl-check' in text_lower or 'checking your browser' in text_lower or 'challenge-platform' in text_lower or 'cdn-cgi' in text_lower:
         return 'cloudflare'
-    if 'captcha' in text_lower:
+    elif 'captcha' in text_lower:
         return 'captcha'
-    if 'age verification' in text_lower or 'you must be 18' in text_lower or 'age-gate' in text_lower:
+    elif 'age verification' in text_lower or 'you must be 18' in text_lower or 'age-gate' in text_lower:
         return 'age_gate'
-    if 'cookie consent' in text_lower or 'accept cookies' in text_lower or 'we use cookies' in text_lower:
+    elif 'cookie consent' in text_lower or 'accept cookies' in text_lower or 'we use cookies' in text_lower:
         return 'cookie_consent'
-    if 'access denied' in text_lower or '403 forbidden' in text_lower:
+    elif 'access denied' in text_lower or '403 forbidden' in text_lower:
         return 'access_denied'
-    if '429 too many' in text_lower:
+    elif '429 too many' in text_lower:
         return 'rate_limited'
     return 'unknown'
 
@@ -839,26 +835,142 @@ def _strip_block_overlay(html):
     """Strip overlay/modals from the page (age-gates, cookie consent, popups)."""
     if not html:
         return html
-        from bs4 import BeautifulSoup
-    
+
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
-    
-    # Remove overlay elements
-    for tag_name in ["div", "section"]:
+
+    OVERLAY_IDS = {"age-gate", "age_gate", "cookie-consent", "cookie-banner",
+                   "consent-dialog", "gdpr-modal", "ccpa-banner", "privacy-banner"}
+    OVERLAY_CLASSES = {"overlay", "modal", "popup", "dialog", "lightbox",
+                       "banner", "cookie", "consent", "privacy", "age-gate",
+                       "age_gate", "gdpr", "ccpa"}
+    TEXT_PATTERNS = ["are you over 18", "are you 18", "age verification",
+                     "accept all cookies", "accept cookies", "we use cookies",
+                     "i agree", "i accept", "continue to site",
+                     "verify you are", "confirm you are"]
+    BUTTON_TEXTS = {"accept all", "i agree", "i accept", "accept cookies",
+                    "allow all", "continue", "got it", "ok"}
+
+    for tag_name in ["div", "section", "article", "aside", "header", "footer"]:
         for el in soup.find_all(tag_name):
-            cls = el.get("class", [])
-            if any(k in cls for k in ["overlay", "modal", "popup", "dialog", "lightbox", "banner", "cookie", "consent", "privacy", "age-gate"]):
-                el.decompose()
-    
-    # Also remove script/style tags
+            try:
+                el_id = (el.get("id") or "").lower()
+                el_cls = [c.lower() for c in (el.get("class") or [])]
+                el_text = el.get_text(" ", strip=True).lower()[:200]
+
+                # Match by ID
+                if any(k in el_id for k in OVERLAY_IDS):
+                    el.decompose()
+                    continue
+
+                # Match by class
+                if any(k in el_cls for k in OVERLAY_CLASSES):
+                    el.decompose()
+                    continue
+
+                # Match by text content (for JS-injected overlays)
+                if any(p in el_text for p in TEXT_PATTERNS):
+                    el.decompose()
+                    continue
+            except (AttributeError, TypeError):
+                pass
+
+    # Remove accept/agree buttons even outside overlay containers
+    for btn in soup.find_all(["button", "a"]):
+        try:
+            btn_text = btn.get_text(strip=True).lower()
+            if btn_text in BUTTON_TEXTS:
+                btn.decompose()
+        except (AttributeError, TypeError):
+            pass
+
+    # Remove script/style tags
     for tag_name in ["script", "style"]:
         for el in soup.find_all(tag_name):
             el.decompose()
-    
+
     return str(soup)
+
+# ── Domain blocklist (low-value sites) ──────────────────────────────────────
+BLOCKED_DOMAINS = {
+    # Analytics / tracking
+    "google-analytics.com", "googletagmanager.com", "analytics.google.com",
+    "hotjar.com", "mixpanel.com", "amplitude.com", "segment.io",
+    "heap.io", "mouseflow.com", "fullstory.com", "clarity.ms",
+    "matomo.org", "piwik.pro", "smartlook.com",
+    # Ads
+    "doubleclick.net", "googlesyndication.com", "adservice.google.com",
+    "pagead2.googlesyndication.com", "adnxs.com", "adskeeper.com",
+    "popads.net", "propellerads.com", "hilltopads.com",
+    "adcolony.com", "unity3d.com/ads", "inmobi.com",
+    # Social widgets (non-content)
+    "addthis.com", "sharethis.com", "outbrain.com", "taboola.com",
+    "spot.im", "disqus.com", "livefyre.com",
+    # SEO spam / content farms
+    "zippia.com", "rocketreach.co", "signalhire.com",
+    "zoominfo.com", "apollo.io", "hunter.io",
+    # Redirect / shorteners (non-content)
+    "t.co", "bit.ly", "tinyurl.com", "ow.ly", "is.gd", "buff.ly",
+    "cutt.ly", "shorturl.at",
+    # Placeholder / error pages
+    "example.com", "example.org", "example.net",
+    "localhost", "127.0.0.1",
+    # Search engines / meta-sites (appear as results but contain no content)
+    "bing.com", "www.bing.com", "m.bing.com",
+    "search.yahoo.com", "search.yahoo.co.jp",
+    "duckduckgo.com", "html.duckduckgo.com",
+    "ask.com", "webcrawler.com",
+    # Aggregator / platform pages (generic, not topic-specific)
+    "start.ru", "store.steampowered.com",
+    "apps.apple.com", "play.google.com",
+    "afisha.yandex.ru", "realty.yandex.ru",
+    "market.yandex.ru", "travel.yandex.ru",
+    "auto.ru", "dzen.ru",
+    "e1.ru", "gismeteo.ru",
+    "vk.com", "ok.ru",
+    # Generic portals (never contain specific topic info)
+    # NOTE: images.yandex.ru is NOT blocked (useful for visual search)
+    "mail.ru", "inbox.ru", "list.ru",
+    "rambler.ru", "lenta.ru",
+    "afisha.yandex.ru", "realty.yandex.ru",
+    "market.yandex.ru", "travel.yandex.ru",
+    "auto.yandex.ru", "dzen.ru",
+    "e1.ru", "gismeteo.ru",
+    "vk.com", "ok.ru",
+}
+
+# Visual-specific allowlist (override blocklist for image queries)
+VISUAL_ALLOWLIST = {
+    "pinterest.com", "pinterest.co.uk", "pinterest.ca",
+    "deviantart.com", "artstation.com",
+    "flickr.com", "staticflickr.com",
+    "tumblr.com", "assets.tumblr.com",
+    "reddit.com/i/", "i.redd.it",
+    "imgur.com", "i.imgur.com",
+    "500px.com", "unsplash.com", "pixabay.com",
+}
+
+
+def is_blocked_domain(url, query_type=None):
+    """Check if URL belongs to a blocked domain. Returns True if blocked."""
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return False
+    host = host.lower()
+    # Check blocked domains
+    for d in BLOCKED_DOMAINS:
+        if host == d or host.endswith("." + d):
+            # Allow if visual query and domain is in visual allowlist
+            if query_type == "visual":
+                for a in VISUAL_ALLOWLIST:
+                    if host == a or host.endswith("." + a):
+                        return False
+            return True
+    return False
+
 
 class _ContentParser:
     """Extract structured content from HTML using bs4."""
@@ -918,6 +1030,176 @@ class _ContentParser:
                     self.images.append({"alt": alt, "src": src})
         
         return self
+
+
+# ── JS data extraction from <script> tags ───────────────────────────────────
+_SCRIPT_DATA_PATTERNS = [
+    re.compile(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S),
+    re.compile(r'<script[^>]*>\s*window\.__[A-Z_]+\s*=\s*(\{.*?\})\s*;?\s*</script>', re.S),
+    re.compile(r'<script\s+type="application/ld\+json"[^>]*>(.*?)</script>', re.S),
+    re.compile(r'data-react-props="([^"]+)"'),
+]
+
+
+def extract_js_data(html):
+    """Extract structured data from <script> tags (SSR data, JSON-LD, etc.)."""
+    if not html:
+        return {}
+    data = {}
+    for pattern in _SCRIPT_DATA_PATTERNS:
+        for match in pattern.finditer(html):
+            raw = match.group(1).strip()
+            if not raw or len(raw) < 5:
+                continue
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    if "__NEXT_DATA__" in (match.group(0) if match.group(0) else ""):
+                        data["next_data"] = parsed
+                    elif "ld+json" in (match.group(0) if match.group(0) else ""):
+                        data.setdefault("json_ld", []).append(parsed)
+                    else:
+                        data.update(parsed)
+            except (json.JSONDecodeError, ValueError):
+                pass
+    return data
+
+
+# ── Full-size image extraction ──────────────────────────────────────────────
+_TRACKING_IMG_RE2 = re.compile(r'(?:pixel|track|1x1|spacer|blank|clear\.gif|analytics|badge|doubleclick|gstatic)', re.I)
+_FULLSIZE_IMG_MAX = 20
+
+
+def upgrade_to_fullsize(url):
+    """Try common patterns to upgrade a thumbnail URL to full-size.
+
+    Handles: size suffixes, flickr tokens, path segments, CDN subdomains.
+    Returns the best-guess full-size URL (may be same as input if no pattern matched).
+    """
+    if not url:
+        return url
+    original = url
+
+    # 1. Remove size suffixes: -150x150, -small, -thumb, -1200x630, -thumbnail
+    url = re.sub(r'-(?:\d+x\d+|small|thumb|medium|preview|thumbnail|scaled|crop|resize)(\.\w{3,4})$', r'\1', url, flags=re.I)
+
+    # 2. Replace size tokens (flickr, tumblr): _s/_m/_n/_q/_t/_sq → _b/_o
+    url = re.sub(r'_(?:s|m|n|q|t|sq)(\.(?:jpg|jpeg|png|webp|gif))$', r'_b\1', url, flags=re.I)
+
+    # 3. Remove path segments: /thumbs/, /preview/, /small/, /medium/
+    url = re.sub(r'/(?:thumbs|thumb|preview|small|medium|thumbnail|crop|resize)/', '/', url)
+
+    # 4. Replace CDN subdomains: t. → i., thumbnails. → images.
+    url = re.sub(r'^https?://t\.', 'https://i.', url)
+    url = re.sub(r'^https?://thumbnails\.', 'https://images.', url)
+    url = re.sub(r'^https?://thumb\.', 'https://cdn.', url)
+
+    # 5. Remove query params that limit size: ?w=200&h=200, ?size=small
+    url = re.sub(r'[?&](?:w|h|width|height|size|dim|quality|q)=\d+', '', url)
+    url = re.sub(r'\?$', '', url)  # Clean trailing ?
+
+    return url if url != original else original
+
+
+def extract_fullsize_images(html, base_url=""):
+    """Extract full-size image URLs from page HTML using common patterns.
+
+    Sources: og:image, srcset (max size), data-original/lazy-src,
+    gallery <a><img> pattern, JSON-LD image field.
+    Returns list of deduplicated absolute URLs.
+    """
+    if not html:
+        return []
+
+    urls = []
+
+    # 1. OpenGraph image (most reliable full-size source)
+    for m in re.finditer(r'<meta[^>]+(?:property|name)="og:image"[^>]+content="([^"]+)"', html, re.I):
+        urls.append(m.group(1))
+    for m in re.finditer(r'<meta[^>]+content="([^"]+)"[^>]+(?:property|name)="og:image"', html, re.I):
+        urls.append(m.group(1))
+
+    # 2. Gallery pattern: <a href="..."><img (links to full-size)
+    for m in re.finditer(r'<a[^>]+href="([^"]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"]*)?)"[^>]*>\s*<img', html, re.I):
+        urls.append(m.group(1))
+
+    # 3. srcset — extract largest variant
+    for m in re.finditer(r'srcset="([^"]+)"', html, re.I):
+        parts = m.group(1).split(',')
+        best_url = ""
+        best_w = 0
+        for part in parts:
+            part = part.strip()
+            tokens = part.split()
+            if not tokens:
+                continue
+            url = tokens[0]
+            w_match = re.search(r'(\d+)w', part)
+            w = int(w_match.group(1)) if w_match else 0
+            if w > best_w:
+                best_w = w
+                best_url = url
+        if best_url:
+            urls.append(best_url)
+
+    # 4. data-original / data-lazy-src / data-full-src (lazy-load full-size)
+    for m in re.finditer(r'data-(?:original|lazy-src|full-src|hi-res-src)="([^"]+)"', html, re.I):
+        urls.append(m.group(1))
+
+    # 5. JSON-LD image field
+    for m in re.finditer(r'"image"\s*:\s*"(https?://[^"]+)"', html):
+        urls.append(m.group(1))
+
+    # 6. <figure> + <a href> pattern (gallery pages)
+    for m in re.finditer(r'<figure[^>]*>\s*<a[^>]+href="([^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"', html, re.I):
+        urls.append(m.group(1))
+
+    # Resolve relative URLs and deduplicate
+    seen = set()
+    resolved = []
+    parsed_base = urllib.parse.urlparse(base_url) if base_url else None
+    for url in urls:
+        url = url.strip()
+        if not url:
+            continue
+        if url.startswith("//"):
+            url = "https:" + url
+        elif url.startswith("/") and parsed_base:
+            url = f"{parsed_base.scheme}://{parsed_base.netloc}{url}"
+        if url in seen:
+            continue
+        seen.add(url)
+        # Filter tracking pixels
+        if _TRACKING_IMG_RE2.search(url):
+            continue
+        # Upgrade thumbnail to full-size
+        url = upgrade_to_fullsize(url)
+        resolved.append(url)
+
+    # Fallback: regular <img> tags with size hints (if few results so far)
+    if len(resolved) < 5:
+        for m in re.finditer(r'<img[^>]+src="([^"]+)"[^>]*>', html, re.I):
+            img_url = m.group(1)
+            tag = m.group(0)
+            if img_url.startswith("//"):
+                img_url = "https:" + img_url
+            elif img_url.startswith("/") and parsed_base:
+                img_url = f"{parsed_base.scheme}://{parsed_base.netloc}{img_url}"
+            if img_url in seen or not img_url.startswith("http"):
+                continue
+            # Skip tiny images by width/height attributes
+            w = re.search(r'width="(\d+)"', tag, re.I)
+            h = re.search(r'height="(\d+)"', tag, re.I)
+            if (w and int(w.group(1)) < 50) or (h and int(h.group(1)) < 50):
+                continue
+            if _TRACKING_IMG_RE2.search(img_url):
+                continue
+            seen.add(img_url)
+            resolved.append(img_url)
+            if len(resolved) >= _FULLSIZE_IMG_MAX:
+                break
+
+    return resolved[:_FULLSIZE_IMG_MAX]
 
 
 # ── Deep Search: validation, classification, image preview ──────────────────
@@ -1022,15 +1304,22 @@ def _extract_image_urls(html, domain_base, max_count=3):
         if not src:
             continue
         
+        # Skip tracking pixels and tiny icons
+        src_lower = src.lower()
+        if any(p in src_lower for p in ["pixel", "track", "1x1", "spacer", "blank", "clear.gif", "analytics", "badge"]):
+            continue
+        if img.get("width") in ("1", "2") or img.get("height") in ("1", "2"):
+            continue
+        
         # Handle relative URLs
         if src.startswith("//"):
             src = "https:" + src
         elif src.startswith("/") and domain_base:
-            # Extract base URL (scheme + host) from the domain
             parsed = urllib.parse.urlparse(domain_base)
             if parsed.scheme:
                 src = parsed.scheme + "://" + parsed.netloc + src
-            continue
+            else:
+                continue
         elif src.startswith("/") and not domain_base:
             continue
         
@@ -1106,9 +1395,29 @@ def _check_url_live(url, timeout=10):
         cl = head_resp.headers.get("content-length", "0")
         result["content_length"] = int(cl) if cl.isdigit() else 0
 
-        # Hard error / block — stop here, GET not needed
-        if result["status"] in (403, 404, 405, 410, 429, 451, 500, 502, 503, 504):
-            result["blocked"] = result["status"] in (403, 429, 451, 503)
+        # Hard error / block — try proxy retry for retryable statuses
+        if result["status"] in (403, 429, 451, 503):
+            if USE_PROXY and PROXY_URL:
+                try:
+                    import curl_cffi
+                    proxy_session = curl_cffi.requests.Session(
+                        impersonate=random.choice(IMPERSONATE_POOL),
+                        proxies={"http": PROXY_URL, "https": PROXY_URL},
+                        verify=False, timeout=timeout,
+                    )
+                    proxy_head = proxy_session.head(url, timeout=timeout, allow_redirects=True)
+                    if proxy_head.status_code < 400:
+                        result["status"] = proxy_head.status_code
+                        result["blocked"] = False
+                except Exception:
+                    pass
+            if result.get("blocked") is False:
+                pass  # proxy retry succeeded
+            else:
+                result["blocked"] = True
+                result["error"] = f"HTTP {result['status']}"
+                return result
+        elif result["status"] in (404, 405, 410, 500, 502, 504):
             result["error"] = f"HTTP {result['status']}"
             return result
 
@@ -1135,9 +1444,28 @@ def _check_url_live(url, timeout=10):
         raw = body_resp.text
 
         if _detect_blocked(raw):
-             result["blocked"] = True
-             result["error"] = "blocked (captcha/cloudflare/etc)"
-             return result
+             # Retry with proxy if available
+             if USE_PROXY and PROXY_URL:
+                 try:
+                     proxy_session = _get_session.__wrapped__() if hasattr(_get_session, '__wrapped__') else None
+                     if not proxy_session:
+                         import curl_cffi
+                         proxy_session = curl_cffi.requests.Session(
+                             impersonate=random.choice(IMPERSONATE_POOL),
+                             proxies={"http": PROXY_URL, "https": PROXY_URL},
+                             verify=False, timeout=timeout,
+                         )
+                     proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
+                     if proxy_resp.status_code < 400 and not _detect_blocked(proxy_resp.text):
+                         raw = proxy_resp.text
+                         result["blocked"] = False
+                         result["error"] = None
+                 except Exception:
+                     pass
+             if result.get("blocked") or _detect_blocked(raw):
+                 result["blocked"] = True
+                 result["error"] = "blocked (captcha/cloudflare/etc)"
+                 return result
 
         result["body"] = raw
         text = re.sub(r'<[^>]+>', ' ', raw)
@@ -1181,6 +1509,29 @@ def _relevance_score(query, title, body_text):
             scored.add(word)
     
     return len(scored) / len(query_words)
+
+
+def content_relevance_score(query, text):
+    """Score how relevant a page's text content is to the query.
+
+    Returns 0.0-1.0. Higher = more relevant.
+    Filters out generic/irrelevant pages (e.g., realty.yandex.ru for a person query).
+    """
+    if not text:
+        return 0.0
+    query_words = [w.lower() for w in re.findall(r'\b\w+\b', query) if len(w) > 2]
+    if not query_words:
+        return 0.0
+    text_lower = text.lower()[:10000]
+    hits = sum(1 for w in query_words if w in text_lower)
+    base_score = hits / len(query_words)
+    # Penalty for very short text (likely blocked/error page)
+    if len(text) < 200:
+        base_score *= 0.3
+    # Bonus for query words appearing multiple times
+    multi_hit = sum(1 for w in query_words if text_lower.count(w) >= 3)
+    base_score += (multi_hit / len(query_words)) * 0.2
+    return min(base_score, 1.0)
 
 
 def search_deep(query, validate=True, classify=True, max_validate=50,
@@ -1262,6 +1613,9 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
         }
 
     raw_count = len(all_raw)
+
+    # Filter blocked domains before validation (saves N network requests)
+    all_raw = [item for item in all_raw if not is_blocked_domain(item.get("url", ""), query_type)]
 
     if not query_variants and raw_count < max_validate and _QUERY_VARIANTS_MODULE:
         try:
