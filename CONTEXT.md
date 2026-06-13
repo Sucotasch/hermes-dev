@@ -33,7 +33,6 @@ repo:
     test_query_variants.py         <- unit tests for query_variants
   hermes-agent/
     test_coverage_gate.py          <- unit tests for coverage gate
-  ProviderManager/                 <- unrelated to deep research (legacy)
 ```
 
 ## Verified states and invariants

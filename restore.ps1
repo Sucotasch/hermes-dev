@@ -115,12 +115,6 @@ $Files = @(
     @{ Repo = 'CONTEXT.md'; Dest = 'CONTEXT.md' }
     @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
     @{ Repo = 'skills\web-deep-search\SKILL.md'; Dest = 'skills\web-deep-search\SKILL.md' }
-    @{ Repo = 'ProviderManager\provider_manager.py'; Dest = 'ProviderManager\provider_manager.py' }
-    @{ Repo = 'ProviderManager\gui.py'; Dest = 'ProviderManager\gui.py' }
-    @{ Repo = 'ProviderManager\hermes_provider_config.py'; Dest = 'ProviderManager\hermes_provider_config.py' }
-    @{ Repo = 'ProviderManager\watchdog.py'; Dest = 'ProviderManager\watchdog.py' }
-    @{ Repo = 'ProviderManager\provider_tool.py'; Dest = 'ProviderManager\provider_tool.py' }
-    @{ Repo = 'ProviderManager\launch_gui.py'; Dest = 'ProviderManager\launch_gui.py' }
 )
 
 foreach ($f in $Files) {
