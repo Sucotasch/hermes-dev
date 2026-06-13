@@ -137,7 +137,7 @@ print('bad check_fn:', bad)
 - `ddg_search.py` was patched in-place; if Hermes update overwrites it, some paths may regress. Verify after each backend update.
 - `httpx`/`curl_cffi` proxy workaround is version-sensitive; upgrades may change exception types.
 - `restore.ps1` expects PowerShell. On Git Bash / MSYS2, run explicitly via `powershell.exe -File ...`.
-- `content_relevance_score` is keyword-overlap based; it can't distinguish "Sara James" (different person) from "Sara St James" without explicit disambiguation logic.
+- `content_relevance_score` uses person/entity disambiguation: for person queries (all short words), entity phrase must appear as substring. Topic queries use flexible word-overlap. Handles "Sara James" vs "Sara St James" correctly (namesake → 0.0).
 
 ## Dependencies and versions
 - Python: 3.11.11 (venv under `hermes-agent/venv`)

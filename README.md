@@ -99,6 +99,8 @@ python -m pytest hermes-agent/test_coverage_gate.py
 - **DNS circuit breaker**: skips remaining strategies on DNS failure
 - **Proxy retry**: retries blocked URLs through NECOBOX proxy
 - **JS-block detection**: catches "JavaScript is disabled" pages
+- **Exponential backoff**: 1.5s→3s→6s retry delays (cap 10s)
+- **Header bot detection**: checks cf-ray/server headers before GET
 - **Overlay stripping**: removes age-gate, cookie consent, modal popups
 
 ### Image Extraction
@@ -110,7 +112,7 @@ python -m pytest hermes-agent/test_coverage_gate.py
 
 - 40-46% of URLs blocked by Cloudflare/WAF — proxy retry helps 5-10%
 - IMDB, Wikipedia, Reddit blocked — require JS execution or API access
-- `content_relevance_score` is keyword-based, can't disambiguate similar names
+- `content_relevance_score` handles person disambiguation via entity phrase matching; topic queries use flexible word-overlap
 - `image_search` returns page URLs, not always direct .jpg links
 - No headless browser — JS-heavy SPA content is missed
 
