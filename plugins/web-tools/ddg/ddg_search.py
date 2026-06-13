@@ -187,8 +187,8 @@ def _fetch(url, mode="document", referrer=None):
                 if html and not _detect_blocked(html) and _is_valid_content(html):
                     return html
                 
-                # Blocked or invalid — wait and retry
-                time.sleep(1.5 + random.uniform(0, 0.5))
+                # Blocked or invalid — exponential backoff
+                time.sleep(min(1.5 * (2 ** attempt) + random.uniform(0, 0.5), 10))
                 
             except Exception as e:
                 time.sleep(2)
@@ -1425,6 +1425,14 @@ def _check_url_live(url, timeout=10):
             result["error"] = f"HTTP {result['status']}"
             return result
 
+        # Header-based bot detection (fast fail before GET)
+        server = head_resp.headers.get("server", "").lower()
+        cf_headers = ["cf-ray", "cf-mitigated", "x-amz-cf-id"]
+        if "cloudflare" in server or any(h in head_resp.headers for h in cf_headers):
+            if result["status"] in (403, 503):
+                # Cloudflare challenge on HEAD — skip GET, go straight to proxy retry
+                pass  # fall through to proxy retry below
+
     except Exception as e:
         result["error"] = str(e)
         return result
@@ -1515,7 +1523,8 @@ def content_relevance_score(query, text):
     """Score how relevant a page's text content is to the query.
 
     Returns 0.0-1.0. Higher = more relevant.
-    Filters out generic/irrelevant pages (e.g., realty.yandex.ru for a person query).
+    Person queries: entity phrase (all words except last) must appear as substring.
+    Topic queries: word-overlap scoring (flexible).
     """
     if not text:
         return 0.0
@@ -1523,12 +1532,25 @@ def content_relevance_score(query, text):
     if not query_words:
         return 0.0
     text_lower = text.lower()[:10000]
+
+    # Detect person query: all words are short (names have short words)
+    is_person = all(len(w) <= 5 for w in query_words)
+
+    if is_person and len(query_words) >= 2:
+        # Person query: entity phrase = all words except the last (context word like "model")
+        # "Sara St James model" → entity = "sara st james"
+        # "Python tutorial" → entity = "python" (only 1 word, skip)
+        entity_words = [w.lower() for w in re.findall(r'\b\w+\b', query)]
+        entity_phrase = " ".join(entity_words[:-1]) if len(entity_words) > 1 else entity_words[0]
+        norm_entity = re.sub(r'\.', '', entity_phrase)
+        norm_text = re.sub(r'\.', '', text_lower)
+        if norm_entity not in norm_text:
+            return 0.0
+
     hits = sum(1 for w in query_words if w in text_lower)
     base_score = hits / len(query_words)
-    # Penalty for very short text (likely blocked/error page)
     if len(text) < 200:
         base_score *= 0.3
-    # Bonus for query words appearing multiple times
     multi_hit = sum(1 for w in query_words if text_lower.count(w) >= 3)
     base_score += (multi_hit / len(query_words)) * 0.2
     return min(base_score, 1.0)

@@ -142,8 +142,8 @@ def _fetch(url, referrer=None, cookies=None):
                 if html and len(html) > 100 and not _is_blocked(html):
                     return html
                 
-                # Blocked or invalid — wait and retry
-                time.sleep(1.5 + random.uniform(0, 0.5))
+                # Blocked or invalid — exponential backoff
+                time.sleep(min(1.5 * (2 ** attempt) + random.uniform(0, 0.5), 10))
                 
             except Exception as e:
                 # DNS circuit breaker: don't retry on DNS failures
