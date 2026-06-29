@@ -14,6 +14,27 @@ import visit_website_enhanced as vwe
 from llm_client import classify_query_type, synthesize_answer
 
 
+def _query_variants(query):
+    """Generate query variants. Try query_variants module, fallback to static."""
+    try:
+        import query_variants
+        generated = query_variants.generate(query)
+        if generated:
+            return generated
+    except Exception:
+        pass
+    base = [query]
+    tokens = [t for t in re.findall(r'\b\w+\b', query.lower()) if len(t) > 3]
+    if tokens:
+        base += [
+            f'{tokens[0]} history',
+            f'{tokens[0]} trends',
+            f'{tokens[0]} examples',
+            f'best {tokens[0]} resources',
+        ]
+    return base
+
+
 def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=50, verbose=True):
     """Execute full deep research pipeline.
@@ -43,7 +64,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     t = time.time()
     all_results = []
     seen_urls = set()
-    variants = ddg_search._query_variants_wrapper(query)
+    variants = _query_variants(query)
 
     for i, q in enumerate(variants[:4]):
         r = ddg_search.web_search(q, count=50, region="wt-wt", safe="auto")
