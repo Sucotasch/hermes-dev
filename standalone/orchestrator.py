@@ -176,9 +176,9 @@ def run_deep_research(query, server_url="http://localhost:8888",
     timings["deep_read"] = round(time.time() - t, 1)
     log(f"  {len(deep_pages)} pages deep-read ({timings['deep_read']}s)")
 
-    # Step 8: Image search
+    # Step 8: Image search (for visual AND person queries)
     images = []
-    if query_type == "visual":
+    if query_type in ("visual", "person"):
         log("Searching images...")
         t = time.time()
         r = ddg_search.image_search(query, count=10)
@@ -220,11 +220,18 @@ Sources:
     ], server_url=server_url, temperature=0.1, max_tokens=2000)
 
     # Pass 2: Synthesize comprehensive answer
+    evidence_urls = "\n".join(
+        f"[{i+1}] {e.get('title', '')} — {e.get('url', '')}"
+        for i, e in enumerate(evidence[:15])
+    )
     synthesis_prompt = f"""You are an expert researcher writing a comprehensive report on: {query}
 Query type: {query_type}
 
 Key facts extracted from sources:
 {facts}
+
+Available sources with URLs:
+{evidence_urls}
 
 Write a detailed, expert-level report with:
 1. Executive summary (3-5 sentences)
@@ -232,7 +239,7 @@ Write a detailed, expert-level report with:
 3. Technical details where relevant
 4. Comparison/evaluation if applicable
 5. Key takeaways
-6. Sources section with [N] inline citations
+6. Sources section with clickable links
 
 Rules:
 - Start with the answer, not the process
@@ -240,7 +247,8 @@ Rules:
 - Include specific technical details, not generalities
 - If information is insufficient, state what's missing
 - Write in the same language as the query
-- Format as clean Markdown with headers"""
+- Format as clean Markdown with headers
+- In Sources section, format as: [N] [Title](URL) — summary"""
 
     answer = chat_completion([
         {"role": "system", "content": "You are an expert deep research analyst. Write comprehensive, detailed reports with specific facts and inline citations."},

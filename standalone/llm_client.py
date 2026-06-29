@@ -42,15 +42,16 @@ def chat_completion(messages, server_url="http://localhost:8888",
 def classify_query_type(query, server_url="http://localhost:8888"):
     """Ask LLM to classify query intent.
 
-    Returns one of: visual, technical, news, historical, comparison, general
+    Returns one of: person, visual, technical, news, historical, comparison, general
     """
     system = """You are a search intent classifier. Given a user query, output ONLY
-one word: visual, technical, news, historical, comparison, or general.
+one word: person, visual, technical, news, historical, comparison, or general.
 
+- person: biography, career, filmography, aliases, personal life of a specific person
 - visual: images, photos, art, galleries, portraits, design
 - technical: code, API, config, error, architecture, documentation
 - news: recent events, current affairs, breaking news
-- historical: history, background, origins, timeline
+- historical: history, background, origins, timeline (NOT about a specific person)
 - comparison: X vs Y, pros/cons, advantages/disadvantages
 - general: everything else"""
 
@@ -61,7 +62,7 @@ one word: visual, technical, news, historical, comparison, or general.
 
     if response:
         response = response.strip().lower()
-        valid = ["visual", "technical", "news", "historical", "comparison", "general"]
+        valid = ["person", "visual", "technical", "news", "historical", "comparison", "general"]
         if response in valid:
             return response
     return "general"
@@ -83,7 +84,7 @@ def synthesize_answer(query, evidence, query_type="general",
     evidence_text = "\n".join(
         f"[{i+1}] {e.get('title', '')} ({e.get('relevance', 0):.0%})\n"
         f"    {e.get('summary', '')}\n"
-        f"    Source: {e.get('url', '')}"
+        f"    URL: {e.get('url', '')}"
         for i, e in enumerate(evidence[:15])
     )
 
@@ -94,10 +95,12 @@ Rules:
 - Start with the answer, not the process
 - Use inline citations [N] referencing evidence numbers
 - Write in the same language as the query
-- Include a Sources section at the end
+- For every claim, cite the source with [N]
 - Be factual: if evidence is insufficient, say so
-- For visual topics, mention image sources if available
-- Format as clean Markdown"""
+- For person topics: include birth date, career timeline, aliases, key works
+- For visual topics: mention image sources if available
+- Format as clean Markdown with headers
+- In the Sources section, format each source as: [N] [Title](URL) — one-line summary"""
 
     response = chat_completion([
         {"role": "system", "content": system},
