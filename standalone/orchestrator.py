@@ -183,9 +183,16 @@ def run_deep_research(query, server_url="http://localhost:8888",
         t = time.time()
         r = ddg_search.image_search(query, count=10)
         if r:
-            images = r.get("results", [])[:8]
+            for img in r.get("results", [])[:8]:
+                url = img.get("url", "")
+                if url:
+                    images.append({
+                        "url": url,
+                        "title": img.get("title", ""),
+                        "thumbnail": img.get("thumbnail", ""),
+                    })
         timings["images"] = round(time.time() - t, 1)
-        log(f"  {len(images)} images ({timings['images']}s)")
+        log(f"  {len(images)} image sources ({timings['images']}s)")
 
     # Step 9: Build evidence pack (use deep_text if available, else summary)
     evidence = []
@@ -224,6 +231,12 @@ Sources:
         f"[{i+1}] {e.get('title', '')} — {e.get('url', '')}"
         for i, e in enumerate(evidence[:15])
     )
+    images_text = ""
+    if images:
+        images_text = "\nImage sources (pages with photos/portraits):\n" + "\n".join(
+            f"- [{img.get('title', 'Image')}]({img.get('url', '')})"
+            for img in images[:8]
+        )
     synthesis_prompt = f"""You are an expert researcher writing a comprehensive report on: {query}
 Query type: {query_type}
 
@@ -232,6 +245,7 @@ Key facts extracted from sources:
 
 Available sources with URLs:
 {evidence_urls}
+{images_text}
 
 Write a detailed, expert-level report with:
 1. Executive summary (3-5 sentences)
@@ -248,7 +262,9 @@ Rules:
 - If information is insufficient, state what's missing
 - Write in the same language as the query
 - Format as clean Markdown with headers
-- In Sources section, format as: [N] [Title](URL) — summary"""
+- In Sources section, format as: [N] [Title](URL) — summary
+- For person topics, include an "Image Sources" section with clickable links to photo/portrait pages
+- When image sources are provided, list them as links in a dedicated section"""
 
     answer = chat_completion([
         {"role": "system", "content": "You are an expert deep research analyst. Write comprehensive, detailed reports with specific facts and inline citations."},
