@@ -3,7 +3,7 @@
 
 Usage:
     python deep_research.py "your query here"
-    python deep_research.py "your query" --server http://localhost:8080
+    python deep_research.py "your query" --server http://localhost:8888
     python deep_research.py "your query" --validate 100 --output report.md
 """
 import argparse
@@ -34,13 +34,13 @@ def main():
         epilog="""
 Examples:
   python deep_research.py "Jacqueline Lovell biography"
-  python deep_research.py "Python httpx proxy" --server http://192.168.1.100:8080
+  python deep_research.py "Python httpx proxy" --server http://192.168.1.100:8888
   python deep_research.py "modern art trends" --validate 100 --output art_report.md
         """,
     )
     parser.add_argument("query", help="Research query")
-    parser.add_argument("--server", default="http://localhost:8080",
-                        help="llama.cpp server URL (default: http://localhost:8080)")
+    parser.add_argument("--server", default="http://localhost:8888",
+                        help="llama.cpp server URL (default: http://localhost:8888)")
     parser.add_argument("--validate", type=int, default=50,
                         help="Max URLs to validate (default: 50)")
     parser.add_argument("--output", "-o", default=None,

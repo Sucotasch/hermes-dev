@@ -5,7 +5,7 @@ import urllib.request
 import urllib.error
 
 
-def chat_completion(messages, server_url="http://localhost:8080",
+def chat_completion(messages, server_url="http://localhost:8888",
                     temperature=0.3, max_tokens=2000):
     """Send chat completion request to OpenAI-compatible server.
 
@@ -39,7 +39,7 @@ def chat_completion(messages, server_url="http://localhost:8080",
         return None
 
 
-def classify_query_type(query, server_url="http://localhost:8080"):
+def classify_query_type(query, server_url="http://localhost:8888"):
     """Ask LLM to classify query intent.
 
     Returns one of: visual, technical, news, historical, comparison, general
@@ -68,7 +68,7 @@ one word: visual, technical, news, historical, comparison, or general.
 
 
 def synthesize_answer(query, evidence, query_type="general",
-                      server_url="http://localhost:8080"):
+                      server_url="http://localhost:8888"):
     """Synthesize a final answer from evidence pack.
 
     Args:

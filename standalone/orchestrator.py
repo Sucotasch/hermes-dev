@@ -14,7 +14,7 @@ import visit_website_enhanced as vwe
 from llm_client import classify_query_type, synthesize_answer
 
 
-def run_deep_research(query, server_url="http://localhost:8080",
+def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=50, verbose=True):
     """Execute full deep research pipeline.
 
