@@ -176,6 +176,27 @@ def _query_variants_wrapper(query):
     return base
 
 
+def _compact_evidence(pages, max_per_page=500):
+    """Compress evidence pack: first paragraph + metadata instead of full text.
+
+    Reduces token usage for small context windows (96k models).
+    Returns compact list with summary, url, title, relevance.
+    """
+    compact = []
+    for p in pages:
+        text = p.get("text", "")
+        # First paragraph is most informative
+        summary = text.split("\n\n")[0][:max_per_page] if text else ""
+        compact.append({
+            "url": p.get("url", ""),
+            "title": p.get("title", ""),
+            "relevance": round(p.get("relevance", 0), 2),
+            "summary": summary,
+            "alive": p.get("alive", False),
+        })
+    return compact
+
+
 def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=5000, query_type=None):
     """Composite deep research pipeline."""
     if search_deep is None:
@@ -242,13 +263,13 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
 
     # Post-retrieval dedupe + source quotas (based on TinySearch chunk pool selection).
     # Outcome: Jasper reducer for duplicated content and single-source bias.
-    evidence = _apply_post_retrieval_filter(evidence, query=query)
+    evidence = _apply_post_retrieval_filter(evidence, query=query, final_limit=25)
 
     images = []
     if query_type == "visual" and image_search is not None:
         try:
             img_out = image_search(query)
-            for item in img_out.get("results", [])[:20]:
+            for item in img_out.get("results", [])[:8]:
                 images.append({
                     "url": item.get("url") or item.get("image_url") or item.get("url"),
                     "title": item.get("title") or item.get("url"),
@@ -256,6 +277,9 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
                 })
         except Exception:
             pass
+
+    # Compact evidence for small context windows
+    compact_evidence = _compact_evidence(evidence)
 
     return {
         "query": query,
@@ -268,12 +292,12 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
             "images": len(images),
             "level1_time": level1_time,
         },
-        "pages": evidence,
+        "pages": compact_evidence,
         "images": images,
     }
 
 
-def _apply_post_retrieval_filter(evidence, query):
+def _apply_post_retrieval_filter(evidence, query, final_limit=80):
     """Apply Jaccard-based deduplication + per-source URL quotas to evidence pages."""
 
     def _tokenize(text: str):
@@ -290,7 +314,6 @@ def _apply_post_retrieval_filter(evidence, query):
         union = len(a | b)
         return inter / union if union else 0.0
 
-    final_limit = 80
     max_per_source_url = 4
     jaccard_threshold = 0.85
 
