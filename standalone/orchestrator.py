@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Deep research orchestrator — full pipeline with Level 2, deep-read, multi-pass synthesis."""
+"""Deep research orchestrator — full pipeline with page-extracted images."""
 import sys
 import time
 import re
@@ -66,29 +66,50 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None):
     return validated, alive_count
 
 
-def _deep_read_top_pages(pages, query, top_n=5, verbose=True, log=None):
-    """Fetch full content from top pages for deeper analysis."""
+def _deep_read_and_extract(pages, top_n=8, verbose=True, log=None):
+    """Deep-read pages: fetch full content + extract images from raw HTML."""
     deep_pages = []
+    all_images = []
     for p in pages[:top_n]:
         url = p.get("url", "")
         if not url:
             continue
         if log:
-            log(f"    Deep-read: {url[:60]}...")
+            log(f"    Reading: {url[:60]}...")
         try:
-            result = vwe.visit_website(url, max_chars=10000)
-            content = result.get("content", "")
-            if content and len(content) > 500:
-                p["deep_text"] = content[:10000]
+            # Get raw HTML for image extraction
+            raw_html = vwe._fetch(url)
+            if not raw_html or len(raw_html) < 300:
+                continue
+
+            # Extract images from raw HTML
+            imgs = ddg_search.extract_fullsize_images(raw_html, url)
+
+            # Parse text content for evidence
+            from bs4 import BeautifulSoup
+            try:
+                soup = BeautifulSoup(raw_html, "lxml")
+            except Exception:
+                soup = BeautifulSoup(raw_html, "html.parser")
+            text = soup.get_text(separator=" ", strip=True)[:10000]
+
+            if text and len(text) > 300:
+                p["deep_text"] = text
                 deep_pages.append(p)
+                for img_url in imgs[:5]:
+                    all_images.append({
+                        "url": img_url,
+                        "source_page": url,
+                        "source_title": p.get("title", ""),
+                    })
         except Exception:
             pass
-    return deep_pages
+    return deep_pages, all_images
 
 
 def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=100, verbose=True):
-    """Execute full deep research pipeline with Level 2 and multi-pass synthesis."""
+    """Execute full deep research pipeline."""
     log = lambda msg: print(f"  {msg}", flush=True) if verbose else None
     timings = {}
     start_total = time.time()
@@ -100,8 +121,8 @@ def run_deep_research(query, server_url="http://localhost:8888",
     timings["classify"] = round(time.time() - t, 1)
     log(f"  query_type: {query_type} ({timings['classify']}s)")
 
-    # Step 2: Multi-query search (6 variants for deep coverage)
-    log("Searching (6 variants)...")
+    # Step 2: Multi-query search
+    log("Searching...")
     t = time.time()
     all_results = []
     seen_urls = set()
@@ -127,7 +148,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     if log:
         log(f"  After blocklist: {len(all_results)} (-{before - len(all_results)})")
 
-    # Step 4: Validate (100 URLs)
+    # Step 4: Validate
     log(f"Validating {min(len(all_results), max_validate)} URLs...")
     t = time.time()
     validated, alive_count = _validate_urls(all_results, max_validate, verbose, log)
@@ -137,139 +158,119 @@ def run_deep_research(query, server_url="http://localhost:8888",
     # Step 5: Rank by relevance
     validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
 
-    # Step 6: Level 2 expansion (if alive < 20)
+    # Step 6: Level 2 expansion
     level2_count = 0
     if alive_count < 20:
-        log("Level 2 expansion (alive < 20)...")
+        log("Level 2 expansion...")
         t = time.time()
         top_urls = [p["url"] for p in validated[:10] if p.get("url")]
         level2_urls = []
         for url in top_urls:
             try:
                 page = vwe.visit_website(url, max_chars=5000)
-                links = page.get("links", [])
-                for link in links:
+                for link in page.get("links", []):
                     href = link.get("url", "")
-                    if href and href not in seen_urls and ddg_search.content_relevance_score(query, href + " " + link.get("text", "")) > 0.1:
+                    if href and href not in seen_urls:
                         seen_urls.add(href)
                         level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
             except Exception:
                 pass
-
         if level2_urls:
-            log(f"  {len(level2_urls)} Level 2 candidates")
-            l2_validated, l2_alive = _validate_urls(level2_urls[:30], 30, verbose, log)
-            for p in l2_validated:
+            log(f"  {len(level2_urls)} candidates")
+            l2_val, l2_alive = _validate_urls(level2_urls[:30], 30, verbose, log)
+            for p in l2_val:
                 p["relevance"] = ddg_search.content_relevance_score(query, p.get("text", ""))
                 validated.append(p)
-            level2_count = len(l2_validated)
+            level2_count = len(l2_val)
             alive_count += l2_alive
             validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
         timings["level2"] = round(time.time() - t, 1)
-        log(f"  Level 2: +{level2_count} pages ({timings.get('level2', 0)}s)")
+        log(f"  +{level2_count} pages ({timings.get('level2', 0)}s)")
 
-    # Step 7: Deep-read top pages
-    log("Deep-reading top pages...")
+    # Step 7: Deep-read + extract images from pages
+    log("Deep-reading & extracting images from pages...")
     t = time.time()
-    top_pages = validated[:25]
-    deep_pages = _deep_read_top_pages(top_pages, query, top_n=8, verbose=verbose, log=log)
+    deep_pages, page_images = _deep_read_and_extract(validated[:25], top_n=10, verbose=verbose, log=log)
     timings["deep_read"] = round(time.time() - t, 1)
-    log(f"  {len(deep_pages)} pages deep-read ({timings['deep_read']}s)")
+    log(f"  {len(deep_pages)} pages read, {len(page_images)} images extracted ({timings['deep_read']}s)")
 
-    # Step 8: Image search (for visual AND person queries)
+    # Step 8: Deduplicate images
+    seen_imgs = set()
     images = []
-    if query_type in ("visual", "person"):
-        log("Searching images...")
-        t = time.time()
-        r = ddg_search.image_search(query, count=10)
-        if r:
-            for img in r.get("results", [])[:8]:
-                url = img.get("url", "")
-                if url:
-                    images.append({
-                        "url": url,
-                        "title": img.get("title", ""),
-                        "thumbnail": img.get("thumbnail", ""),
-                    })
-        timings["images"] = round(time.time() - t, 1)
-        log(f"  {len(images)} image sources ({timings['images']}s)")
+    for img in page_images:
+        url = ddg_search.upgrade_to_fullsize(img["url"])
+        if url not in seen_imgs:
+            seen_imgs.add(url)
+            images.append({"url": url, "source": img["source_page"], "title": img["source_title"]})
+    images = images[:15]
+    log(f"  {len(images)} unique full-size images")
 
-    # Step 9: Build evidence pack (use deep_text if available, else summary)
+    # Step 9: Build evidence with FULL deep-read text
     evidence = []
     for p in validated[:25]:
         text = p.get("deep_text") or p.get("text", "")
-        summary = text.split("\n\n")[0][:800] if text else ""
         evidence.append({
             "url": p.get("url", ""),
             "title": p.get("title", ""),
             "relevance": round(p.get("relevance", 0), 2),
-            "summary": summary,
+            "content": text[:6000] if text else "",
         })
-    log(f"  Evidence pack: {len(evidence)} pages")
+    log(f"  Evidence: {len(evidence)} pages ({sum(len(e['content']) for e in evidence)} chars)")
 
     # Step 10: Multi-pass synthesis
-    log("Synthesizing (multi-pass)...")
+    log("Synthesizing...")
     t = time.time()
 
-    # Pass 1: Extract key facts from evidence
-    facts_prompt = f"""Analyze these research sources about: {query}
-
-For each source, extract 2-3 key facts with specific details (names, dates, numbers, technical specifics).
-
-Sources:
-"""
-    for i, e in enumerate(evidence[:15]):
-        facts_prompt += f"\n[{i+1}] {e['title']} ({e['relevance']:.0%})\n{e['summary']}\n"
+    # Pass 1: Extract facts from FULL content
+    facts_parts = []
+    for i, e in enumerate(evidence[:10]):
+        facts_parts.append(f"Source [{i+1}] {e['title']}:\n{e['content'][:3000]}")
+    facts_context = "\n\n".join(facts_parts)
 
     facts = chat_completion([
-        {"role": "system", "content": "Extract key facts from research sources. Be specific with names, dates, numbers. Output as structured list."},
-        {"role": "user", "content": facts_prompt},
-    ], server_url=server_url, temperature=0.1, max_tokens=2000)
+        {"role": "system", "content": "Extract specific facts from research sources. Include names, dates, numbers, titles, career details. Be precise and cite source numbers."},
+        {"role": "user", "content": f"Extract key facts about: {query}\n\n{facts_context}"},
+    ], server_url=server_url, temperature=0.1, max_tokens=3000)
 
-    # Pass 2: Synthesize comprehensive answer
-    evidence_urls = "\n".join(
-        f"[{i+1}] {e.get('title', '')} — {e.get('url', '')}"
-        for i, e in enumerate(evidence[:15])
-    )
+    # Pass 2: Synthesize with images
     images_text = ""
     if images:
-        images_text = "\nImage sources (pages with photos/portraits):\n" + "\n".join(
-            f"- [{img.get('title', 'Image')}]({img.get('url', '')})"
-            for img in images[:8]
+        images_text = "\nAvailable images from pages:\n" + "\n".join(
+            f"- ![image]({img['url']})" for img in images[:10]
         )
-    synthesis_prompt = f"""You are an expert researcher writing a comprehensive report on: {query}
+
+    source_list = "\n".join(
+        f"[{i+1}] [{e['title']}]({e['url']})" for i, e in enumerate(evidence[:15])
+    )
+
+    synthesis_prompt = f"""Write a comprehensive research report about: {query}
 Query type: {query_type}
 
-Key facts extracted from sources:
+Extracted facts from sources:
 {facts}
 
-Available sources with URLs:
-{evidence_urls}
+Sources:
+{source_list}
 {images_text}
 
-Write a detailed, expert-level report with:
-1. Executive summary (3-5 sentences)
-2. Detailed analysis with specific facts, names, dates, numbers
-3. Technical details where relevant
-4. Comparison/evaluation if applicable
-5. Key takeaways
-6. Sources section with clickable links
+Requirements:
+1. Executive summary (3-5 sentences with key facts)
+2. Detailed analysis using SPECIFIC facts from the extracted data (names, dates, numbers, titles)
+3. Include ALL relevant images using ![description](URL) markdown syntax
+4. Key takeaways with specific evidence
+5. Sources section with [N] [Title](URL) clickable links
 
-Rules:
-- Start with the answer, not the process
-- Use inline citations [N] for every claim
-- Include specific technical details, not generalities
-- If information is insufficient, state what's missing
+CRITICAL RULES:
+- Use ONLY facts from the extracted data above, do not fabricate
+- Every claim must cite source number [N]
+- Include actual image URLs from the Available images section
 - Write in the same language as the query
-- Format as clean Markdown with headers
-- In Sources section, format as: [N] [Title](URL) — summary
-- For person topics, include an "Image Sources" section with clickable links to photo/portrait pages
-- When image sources are provided, list them as links in a dedicated section"""
+- Be specific: names, dates, numbers, film titles — not generalities"""
 
     answer = chat_completion([
-        {"role": "system", "content": "You are an expert deep research analyst. Write comprehensive, detailed reports with specific facts and inline citations."},
+        {"role": "system", "content": "You are an expert researcher. Write detailed reports using ONLY provided facts. Always include images when available."},
         {"role": "user", "content": synthesis_prompt},
-    ], server_url=server_url, temperature=0.3, max_tokens=4000)
+    ], server_url=server_url, temperature=0.3, max_tokens=5000)
 
     timings["synthesis"] = round(time.time() - t, 1)
     log(f"  Done ({timings['synthesis']}s)")
@@ -286,8 +287,8 @@ Rules:
             "alive": alive_count,
             "level2": level2_count,
             "deep_read": len(deep_pages),
-            "evidence_pages": len(evidence),
             "images": len(images),
+            "evidence_pages": len(evidence),
             "timings": timings,
             "total_time": total_time,
         },
