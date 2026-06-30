@@ -63,7 +63,15 @@ def _extract_main_content(html):
                                        "comment", "social", "share", "related", "recommend"]):
             noise_penalty = 500
 
-        score = text_len + paragraphs * 50 - link_density * 100 + tag_bonus - noise_penalty
+        # Penalty for calendar/archive patterns (lists of dates/months)
+        archive_penalty = 0
+        text_lower = text.lower()
+        if re.search(r'(?:archive|calendar|blog archive|◄|►)', text_lower):
+            archive_penalty = 300
+        if re.search(r'(?:january|february|march|april|may|june|july|august|september|october|november|december)\s*\d{4}', text_lower):
+            archive_penalty += 200
+
+        score = text_len + paragraphs * 50 - link_density * 100 + tag_bonus - noise_penalty - archive_penalty
         candidates.append((score, tag))
 
     if not candidates:
@@ -271,6 +279,13 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None):
             log(f"    Reading: {url[:60]}...")
         try:
             raw_html = vwe._fetch(url)
+            # Jina fallback for JS-heavy sites (Wikipedia, etc.)
+            if not raw_html or len(raw_html) < 500:
+                try:
+                    jina_url = f"https://r.jina.ai/{url}"
+                    raw_html = vwe._fetch(jina_url)
+                except Exception:
+                    pass
             if not raw_html or len(raw_html) < 300:
                 continue
 
@@ -408,7 +423,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     # Step 7: Deep-read + extract images from pages
     log("Deep-reading & extracting images from pages...")
     t = time.time()
-    deep_pages, page_images = _deep_read_and_extract(validated[:25], top_n=10, query=query, verbose=verbose, log=log)
+    deep_pages, page_images = _deep_read_and_extract(validated[:25], top_n=20, query=query, verbose=verbose, log=log)
     timings["deep_read"] = round(time.time() - t, 1)
     log(f"  {len(deep_pages)} pages read, {len(page_images)} images extracted ({timings['deep_read']}s)")
 
