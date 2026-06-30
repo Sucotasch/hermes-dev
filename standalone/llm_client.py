@@ -68,6 +68,38 @@ one word: person, visual, technical, news, historical, comparison, or general.
     return "general"
 
 
+def enrich_query(query, query_type, server_url="http://localhost:8888"):
+    """Ask LLM to enrich query with aliases, related names, context.
+
+    For person queries: adds known aliases/real names/pseudonyms.
+    Universal — LLM decides what to add from its training data.
+    """
+    if query_type != "person":
+        return query
+
+    system = """You are a search query enricher. The user wants to research a specific person.
+Your job is to add known aliases, stage names, real names, or pseudonyms to improve search coverage.
+
+Output ONLY the enriched query string. Include the original query plus any aliases you know.
+
+Examples:
+- Input: "Tom Cruise actor" → Output: "Tom Cruise Thomas Mapother IV actor biography"
+- Input: "Eminem rapper" → Output: "Eminem Marshall Mathers Slim Shady rapper"  
+- Input: "Jacqueline Lovell actress" → Output: "Jacqueline Lovell Sara St James Jackie Lovell actress biography"
+
+If you don't know any aliases, return the original query unchanged.
+Be specific: only add names you are confident about. Do not fabricate."""
+
+    response = chat_completion([
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"Enrich this person research query: {query}"},
+    ], server_url=server_url, temperature=0.0, max_tokens=150)
+
+    if response and len(response.strip()) > len(query):
+        return response.strip()
+    return query
+
+
 def synthesize_answer(query, evidence, query_type="general",
                       server_url="http://localhost:8888"):
     """Synthesize a final answer from evidence pack.

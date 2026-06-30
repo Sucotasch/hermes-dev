@@ -11,7 +11,7 @@ sys.path.insert(0, str(_BACKEND))
 
 import ddg_search
 import visit_website_enhanced as vwe
-from llm_client import chat_completion, classify_query_type
+from llm_client import chat_completion, classify_query_type, enrich_query
 
 
 def _query_variants(query):
@@ -121,12 +121,24 @@ def run_deep_research(query, server_url="http://localhost:8888",
     timings["classify"] = round(time.time() - t, 1)
     log(f"  query_type: {query_type} ({timings['classify']}s)")
 
+    # Step 1b: Enrich query with aliases (for person queries)
+    enriched_query = query
+    if query_type == "person":
+        log("Enriching query with aliases...")
+        t = time.time()
+        enriched_query = enrich_query(query, query_type, server_url)
+        timings["enrich"] = round(time.time() - t, 1)
+        if enriched_query != query:
+            log(f"  enriched: {enriched_query[:80]} ({timings['enrich']}s)")
+        else:
+            log(f"  no additional aliases found ({timings['enrich']}s)")
+
     # Step 2: Multi-query search
     log("Searching...")
     t = time.time()
     all_results = []
     seen_urls = set()
-    variants = _query_variants(query)
+    variants = _query_variants(enriched_query)
 
     for i, q in enumerate(variants[:6]):
         r = ddg_search.web_search(q, count=50, region="wt-wt", safe="auto")
