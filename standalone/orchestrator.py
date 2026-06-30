@@ -172,15 +172,15 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None):
     return validated, alive_count
 
 
-def _deep_read_and_extract(pages, top_n=10, verbose=True, log=None):
+def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None):
     """Deep-read pages: fetch full content + extract images from raw HTML.
-    Applies content cleaning and domain dedup (max 2 per domain)."""
+    Applies content cleaning, relevance filtering, and domain dedup (max 2 per domain)."""
     deep_pages = []
     all_images = []
     domain_counts = {}
     from urllib.parse import urlparse
 
-    for p in pages[:top_n * 2]:  # Over-fetch to compensate for dedup
+    for p in pages[:top_n * 2]:  # Over-fetch to compensate for dedup + relevance filter
         url = p.get("url", "")
         if not url:
             continue
@@ -205,7 +205,6 @@ def _deep_read_and_extract(pages, top_n=10, verbose=True, log=None):
             # Remove noise elements before extracting text
             for tag in soup.find_all(["nav", "footer", "header", "aside", "form", "script", "style"]):
                 tag.decompose()
-            # Remove elements with noise classes
             for tag in soup.find_all(True):
                 classes = [c.lower() for c in (tag.get("class") or [])]
                 if any(k in classes for k in ["sidebar", "archive", "menu", "navigation", "tags", "labels", "meta"]):
@@ -214,7 +213,13 @@ def _deep_read_and_extract(pages, top_n=10, verbose=True, log=None):
             text = soup.get_text(separator="\n", strip=True)
             text = _clean_content(text)
 
+            # Relevance filter: skip pages with no useful content
             if text and len(text) > 300:
+                content_score = ddg_search.content_relevance_score(query, text)
+                if content_score < 0.2:
+                    if log:
+                        log(f"    [skip] low relevance ({content_score:.2f}): {url[:50]}")
+                    continue
                 p["deep_text"] = text
                 deep_pages.append(p)
                 domain_counts[dom] = domain_counts.get(dom, 0) + 1
@@ -320,14 +325,14 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 domain_counts[dom] = domain_counts.get(dom, 0) + 1
             for p in l2_val:
                 p["relevance"] = ddg_search.content_relevance_score(query, p.get("text", ""))
-                if p["relevance"] < 0.15:
+                if p["relevance"] < 0.2:
                     continue
                 dom = urlparse(p.get("url", "")).hostname or ""
                 if domain_counts.get(dom, 0) >= 2:
                     continue
                 domain_counts[dom] = domain_counts.get(dom, 0) + 1
                 validated.append(p)
-            level2_count = len([p for p in l2_val if p.get("relevance", 0) >= 0.15])
+            level2_count = len([p for p in l2_val if p.get("relevance", 0) >= 0.2])
             alive_count += l2_alive
             validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
         timings["level2"] = round(time.time() - t, 1)
@@ -336,7 +341,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     # Step 7: Deep-read + extract images from pages
     log("Deep-reading & extracting images from pages...")
     t = time.time()
-    deep_pages, page_images = _deep_read_and_extract(validated[:25], top_n=10, verbose=verbose, log=log)
+    deep_pages, page_images = _deep_read_and_extract(validated[:25], top_n=10, query=query, verbose=verbose, log=log)
     timings["deep_read"] = round(time.time() - t, 1)
     log(f"  {len(deep_pages)} pages read, {len(page_images)} images extracted ({timings['deep_read']}s)")
 
