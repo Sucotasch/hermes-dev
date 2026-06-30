@@ -42,17 +42,23 @@ def chat_completion(messages, server_url="http://localhost:8888",
 def classify_query_type(query, server_url="http://localhost:8888"):
     """Ask LLM to classify query intent.
 
-    Returns one of: person, visual, technical, news, historical, comparison, general
+    Returns one of: person, visual, technical, news, historical, comparison,
+    fact, art, education, science, general
     """
     system = """You are a search intent classifier. Given a user query, output ONLY
-one word: person, visual, technical, news, historical, comparison, or general.
+one word from this list: person, visual, technical, news, historical, comparison,
+fact, art, education, science, general.
 
 - person: biography, career, filmography, aliases, personal life of a specific person
-- visual: images, photos, art, galleries, portraits, design
-- technical: code, API, config, error, architecture, documentation
+- visual: images, photos, galleries, portraits, design, wallpapers
+- technical: code, API, config, error, architecture, documentation, github, download
 - news: recent events, current affairs, breaking news
-- historical: history, background, origins, timeline (NOT about a specific person)
+- historical: history of events, origins, timeline, evolution of phenomena
 - comparison: X vs Y, pros/cons, advantages/disadvantages
+- fact: specific factual questions (how far, how many, when exactly, what is)
+- art: paintings, artists, art history, galleries, exhibitions, creative works
+- education: tutorials, courses, learning, textbooks, academic
+- science: physics, chemistry, biology, research, discoveries, experiments
 - general: everything else"""
 
     response = chat_completion([
@@ -62,7 +68,8 @@ one word: person, visual, technical, news, historical, comparison, or general.
 
     if response:
         response = response.strip().lower()
-        valid = ["person", "visual", "technical", "news", "historical", "comparison", "general"]
+        valid = ["person", "visual", "technical", "news", "historical", "comparison",
+                 "fact", "art", "education", "science", "general"]
         if response in valid:
             return response
     return "general"

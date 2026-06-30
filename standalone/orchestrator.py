@@ -16,15 +16,73 @@ from llm_client import chat_completion, classify_query_type, enrich_query
 
 def _query_variants(query, query_type="general"):
     """Generate query variants based on query type."""
-    # Query-type specific suffixes
     SUFFIXES = {
-        "person": ["career biography", "filmography movies", "personal life interview", "aliases real name"],
-        "technical": ["documentation guide", "tutorial examples", "best practices"],
-        "visual": ["photos gallery portfolio", "high resolution", "original artwork"],
-        "historical": ["detailed history", "timeline chronology", "archival sources"],
-        "news": ["latest news", "recent developments", "current status"],
-        "comparison": ["vs alternative", "pros cons", "detailed comparison"],
-        "general": ["detailed analysis", "comprehensive guide", "expert overview"],
+        "person": [
+            "career biography filmography",
+            "free gallery photos portraits",
+            "personal life interview",
+            "aliases stage names real name",
+        ],
+        "technical": [
+            "github repository source code",
+            "documentation guide tutorial",
+            "download installation setup",
+            "best practices examples",
+        ],
+        "visual": [
+            "free gallery photos portfolio",
+            "high resolution original",
+            "wallpapers collection",
+            "art exhibition showcase",
+        ],
+        "historical": [
+            "history origins timeline",
+            "detailed chronology evolution",
+            "archival sources primary",
+            "background context facts",
+        ],
+        "news": [
+            "latest news recent",
+            "current status today",
+            "developments updates",
+            "official announcements",
+        ],
+        "comparison": [
+            "vs alternative comparison",
+            "pros cons advantages",
+            "detailed analysis benchmark",
+            "which is better",
+        ],
+        "fact": [
+            "exact answer explanation",
+            "scientific evidence source",
+            "detailed calculation how",
+            "reference data statistics",
+        ],
+        "art": [
+            "gallery exhibition collection",
+            "artist biography works",
+            "high resolution images",
+            "art history analysis",
+        ],
+        "education": [
+            "tutorial course lesson",
+            "textbook guide beginner",
+            "online course free",
+            "academic lecture notes",
+        ],
+        "science": [
+            "research paper study",
+            "experiment results findings",
+            "scientific explanation how",
+            "latest discoveries breakthroughs",
+        ],
+        "general": [
+            "detailed analysis overview",
+            "comprehensive guide expert",
+            "in-depth review",
+            "complete information",
+        ],
     }
 
     suffixes = SUFFIXES.get(query_type, SUFFIXES["general"])
