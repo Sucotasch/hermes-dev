@@ -434,6 +434,8 @@ def run_deep_research(query, server_url="http://localhost:8888",
         log(f"  +{level2_count} pages ({timings.get('level2', 0)}s)")
 
     # Step 7: Deep-read + extract images from pages
+    # Re-sort by relevance after Level 2 expansion
+    validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
     log("Deep-reading & extracting images from pages...")
     t = time.time()
     deep_pages, page_images = _deep_read_and_extract(validated[:25], top_n=20, query=query, verbose=verbose, log=log)
