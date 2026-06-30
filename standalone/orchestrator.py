@@ -268,12 +268,21 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None):
     domain_counts = {}
     from urllib.parse import urlparse
 
-    for p in pages[:top_n * 3]:  # Over-fetch more to compensate for aggressive filtering
+    def _base_domain(hostname):
+        """Extract base domain: en.kinorium.com -> kinorium.com"""
+        if not hostname:
+            return ""
+        parts = hostname.split(".")
+        if len(parts) > 2:
+            return ".".join(parts[-2:])
+        return hostname
+
+    for p in pages[:top_n * 3]:
         url = p.get("url", "")
         if not url:
             continue
-        dom = urlparse(url).hostname or ""
-        if domain_counts.get(dom, 0) >= 1:  # Max 1 per domain
+        dom = _base_domain(urlparse(url).hostname)
+        if domain_counts.get(dom, 0) >= 1:
             continue
         if log:
             log(f"    Reading: {url[:60]}...")
@@ -399,17 +408,21 @@ def run_deep_research(query, server_url="http://localhost:8888",
         if level2_urls:
             log(f"  {len(level2_urls)} candidates")
             l2_val, l2_alive = _validate_urls(level2_urls[:30], 30, verbose, log)
-            # Relevance gate + domain dedup
+            # Relevance gate + domain dedup (base domain)
             domain_counts = {}
+            def _base_domain(h):
+                if not h: return ""
+                parts = h.split(".")
+                return ".".join(parts[-2:]) if len(parts) > 2 else h
             for p in validated:
                 from urllib.parse import urlparse
-                dom = urlparse(p.get("url", "")).hostname or ""
+                dom = _base_domain(urlparse(p.get("url", "")).hostname)
                 domain_counts[dom] = domain_counts.get(dom, 0) + 1
             for p in l2_val:
                 p["relevance"] = ddg_search.content_relevance_score(query, p.get("text", ""))
                 if p["relevance"] < 0.15:
                     continue
-                dom = urlparse(p.get("url", "")).hostname or ""
+                dom = _base_domain(urlparse(p.get("url", "")).hostname)
                 if domain_counts.get(dom, 0) >= 2:
                     continue
                 domain_counts[dom] = domain_counts.get(dom, 0) + 1

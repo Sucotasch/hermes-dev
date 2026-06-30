@@ -924,12 +924,13 @@ BLOCKED_DOMAINS = {
     "ask.com", "webcrawler.com",
     # Aggregator / platform pages (generic, not topic-specific)
     "start.ru", "store.steampowered.com",
-    "apps.apple.com", "play.google.com",
+    "apps.apple.com", "play.google.com", "tv.apple.com",
     "afisha.yandex.ru", "realty.yandex.ru",
     "market.yandex.ru", "travel.yandex.ru",
     "auto.ru", "dzen.ru",
     "e1.ru", "gismeteo.ru",
     "vk.com", "ok.ru",
+    "allmovie.com",  # JS-blocked, returns minimal content
     # Generic portals (never contain specific topic info)
     # NOTE: images.yandex.ru is NOT blocked (useful for visual search)
     "mail.ru", "inbox.ru", "list.ru",
