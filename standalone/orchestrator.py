@@ -14,47 +14,49 @@ import visit_website_enhanced as vwe
 from llm_client import chat_completion, classify_query_type, enrich_query
 
 
-# Blog/boilerplate patterns to strip from content
-_NOISE_PATTERNS = [
-    r'Posted by \w+ at \d+:\d+',
-    r'Email This BlogThis!',
-    r'Share to \w+',
-    r'Blog Archive.*$', r'Newer Post.*$', r'Older Post.*$',
-    r'Subscribe to:.*$', r'Post a Comment.*$',
-    r'No comments:.*$', r'Labels?:.*$',
-    r'Picture Window theme.*$', r'Powered by Blogger.*$',
-    r'Home\s+About\s+Privacy.*$',
-    r'©\d{4}.*$', r'Followers.*$', r'About Me.*$',
-    r'\d{4}\s*►.*$',  # Year archive entries
-    r'►\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)',
+# Boilerplate patterns to strip from content
+_NOISE_LINES = [
+    r'Posted by \w+ at \d+:\d+', r'Email This BlogThis!', r'Share to \w+',
+    r'Blog Archive', r'Newer Post', r'Older Post', r'Subscribe to:',
+    r'Post a Comment', r'No comments:', r'Labels?:', r'Powered by',
+    r'Picture Window theme', r'©\d{4}', r'Followers', r'About Me',
+    r'View web version', r'Home\s+About\s+Privacy', r'Desktop Version',
+    r'Mobile Version', r'Login to add', r'Have your say',
+    r'Edit Page', r'Help keep', r'Recommended$', r'Six Degrees',
+    r'Contributors$', r'Top Contributors', r'Follow .* on Facebook',
+    r'(\d{4}\s*►|►\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))',
+    r'Original Resolution:', r'Jump to navigation', r'Jump to search',
+    r'Picture Of', r'See more ideas',
 ]
+_NOISE_RE = re.compile('|'.join(_NOISE_LINES), re.IGNORECASE)
+
+_NOISE_BLOCKS = {
+    'about', 'faq', 'copyright policy', 'privacy notice', 'terms of service',
+    'remove ads', 'cookie policy', 'contact us', 'advertise',
+    'what is', 'there are some things', 'we would also be interested',
+    'discussions', 'have your say', 'be the first to make a comment',
+}
 
 
 def _clean_content(text):
-    """Remove navigation, tags, dates, blog boilerplate from text."""
+    """Aggressively remove navigation, tags, boilerplate from text."""
     if not text:
         return ""
     lines = text.split("\n")
     cleaned = []
     for line in lines:
         line = line.strip()
-        if not line:
+        if not line or len(line) < 10:
             continue
-        # Skip lines matching noise patterns
-        skip = False
-        for pattern in _NOISE_PATTERNS:
-            if re.search(pattern, line, re.IGNORECASE):
-                skip = True
-                break
-        if skip:
+        if _NOISE_RE.search(line):
             continue
-        # Skip very short lines (likely navigation fragments)
-        if len(line) < 15 and not line[0].isupper():
+        if len(line) < 40 and any(w in line.lower() for w in _NOISE_BLOCKS):
+            continue
+        if line.startswith('http') and ' ' not in line:
             continue
         cleaned.append(line)
-    result = "\n".join(cleaned)
-    # Remove repeated boilerplate blocks
-    result = re.sub(r'(?:Blog Archive|Newer Post|Older Post|Subscribe to).*', '', result, flags=re.DOTALL)
+    result = '\n'.join(cleaned)
+    result = re.sub(r'(?:Blog Archive|Newer Post|Older Post|Subscribe to|Picture Window).*', '', result, flags=re.DOTALL)
     return result.strip()[:4000]
 
 
@@ -180,12 +182,12 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None):
     domain_counts = {}
     from urllib.parse import urlparse
 
-    for p in pages[:top_n * 2]:  # Over-fetch to compensate for dedup + relevance filter
+    for p in pages[:top_n * 3]:  # Over-fetch more to compensate for aggressive filtering
         url = p.get("url", "")
         if not url:
             continue
         dom = urlparse(url).hostname or ""
-        if domain_counts.get(dom, 0) >= 2:
+        if domain_counts.get(dom, 0) >= 1:  # Max 1 per domain
             continue
         if log:
             log(f"    Reading: {url[:60]}...")
@@ -202,12 +204,27 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None):
             except Exception:
                 soup = BeautifulSoup(raw_html, "html.parser")
 
-            # Remove noise elements before extracting text
-            for tag in soup.find_all(["nav", "footer", "header", "aside", "form", "script", "style"]):
+            # Remove structural noise tags (NOT <a> — they contain image links)
+            for tag in soup.find_all(["nav", "footer", "header", "aside", "form",
+                                      "script", "style", "noscript", "iframe",
+                                      "svg", "figure", "figcaption"]):
                 tag.decompose()
+            # Remove elements by class
+            NOISE_CLASSES = {"sidebar", "archive", "menu", "navigation", "tags",
+                            "labels", "meta", "breadcrumb", "pagination", "social",
+                            "share", "follow", "subscribe", "related", "recommend",
+                            "comment", "discussion", "footer", "header", "nav",
+                            "widget", "plugin", "advertisement", "promo", "banner"}
             for tag in soup.find_all(True):
                 classes = [c.lower() for c in (tag.get("class") or [])]
-                if any(k in classes for k in ["sidebar", "archive", "menu", "navigation", "tags", "labels", "meta"]):
+                if any(k in classes for k in NOISE_CLASSES):
+                    tag.decompose()
+            # Remove elements by ID
+            NOISE_IDS = {"sidebar", "footer", "header", "nav", "menu", "comments",
+                        "social", "share", "subscribe", "related", "recommend"}
+            for tag in soup.find_all(True):
+                tag_id = (tag.get("id") or "").lower()
+                if any(k in tag_id for k in NOISE_IDS):
                     tag.decompose()
 
             text = soup.get_text(separator="\n", strip=True)
@@ -216,7 +233,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None):
             # Relevance filter: skip pages with no useful content
             if text and len(text) > 300:
                 content_score = ddg_search.content_relevance_score(query, text)
-                if content_score < 0.2:
+                if content_score < 0.15:
                     if log:
                         log(f"    [skip] low relevance ({content_score:.2f}): {url[:50]}")
                     continue
@@ -325,7 +342,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 domain_counts[dom] = domain_counts.get(dom, 0) + 1
             for p in l2_val:
                 p["relevance"] = ddg_search.content_relevance_score(query, p.get("text", ""))
-                if p["relevance"] < 0.2:
+                if p["relevance"] < 0.15:
                     continue
                 dom = urlparse(p.get("url", "")).hostname or ""
                 if domain_counts.get(dom, 0) >= 2:
@@ -345,25 +362,37 @@ def run_deep_research(query, server_url="http://localhost:8888",
     timings["deep_read"] = round(time.time() - t, 1)
     log(f"  {len(deep_pages)} pages read, {len(page_images)} images extracted ({timings['deep_read']}s)")
 
-    # Step 8: Deduplicate images
+    # Step 8: Deduplicate images (only from relevant pages)
     seen_imgs = set()
     images = []
+    relevant_urls = set()
+    for p in validated[:25]:
+        snippet = p.get("snippet", "") or p.get("text", "")[:500]
+        if ddg_search.content_relevance_score(query, snippet) >= 0.15:
+            relevant_urls.add(p.get("url"))
     for img in page_images:
+        if img["source_page"] not in relevant_urls:
+            continue
         url = ddg_search.upgrade_to_fullsize(img["url"])
         if url not in seen_imgs:
             seen_imgs.add(url)
             images.append({"url": url, "source": img["source_page"], "title": img["source_title"]})
-    images = images[:15]
+    images = images[:10]
     log(f"  {len(images)} unique full-size images")
 
-    # Step 9: Build evidence with FULL deep-read text
+    # Step 9: Build evidence — score by original snippet, include cleaned content
     evidence = []
     for p in validated[:25]:
         text = p.get("deep_text") or p.get("text", "")
+        # Score by original snippet (not cleaned text which loses keywords)
+        snippet = p.get("snippet", "") or p.get("text", "")[:500]
+        relevance = round(ddg_search.content_relevance_score(query, snippet), 2)
+        if relevance < 0.15:
+            continue
         evidence.append({
             "url": p.get("url", ""),
             "title": p.get("title", ""),
-            "relevance": round(p.get("relevance", 0), 2),
+            "relevance": relevance,
             "content": text[:4000] if text else "",
         })
     log(f"  Evidence: {len(evidence)} pages ({sum(len(e['content']) for e in evidence)} chars)")
