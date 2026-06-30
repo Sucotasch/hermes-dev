@@ -75,7 +75,7 @@ Examples:
         print("=" * 60)
         print(report)
 
-    # Save to file
+    # Save report (report already includes header, articles, images, synthesis)
     if args.output:
         output_path = Path(args.output)
     else:
@@ -85,30 +85,8 @@ Examples:
         date = datetime.now().strftime("%Y-%m-%d")
         output_path = reports_dir / f"{slug}_{date}.md"
 
-    # Build full document with metadata
-    full_doc = f"""# Deep Research: {stats['query']}
-
-**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
-**Query type:** {stats['query_type']}
-**Sources:** {stats['evidence_pages']} pages, {stats['images']} images
-**Time:** {stats['total_time']}s
-
----
-
-{report}
-
----
-
-## Methodology
-
-- Raw URLs collected: {stats['raw_urls']}
-- Alive pages: {stats['alive']}
-- Evidence pages: {stats['evidence_pages']}
-- Timings: {stats['timings']}
-"""
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(full_doc, encoding="utf-8")
+    output_path.write_text(report, encoding="utf-8")
 
     if not args.quiet:
         print(f"\n{'=' * 60}")

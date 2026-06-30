@@ -14,6 +14,50 @@ import visit_website_enhanced as vwe
 from llm_client import chat_completion, classify_query_type, enrich_query
 
 
+# Blog/boilerplate patterns to strip from content
+_NOISE_PATTERNS = [
+    r'Posted by \w+ at \d+:\d+',
+    r'Email This BlogThis!',
+    r'Share to \w+',
+    r'Blog Archive.*$', r'Newer Post.*$', r'Older Post.*$',
+    r'Subscribe to:.*$', r'Post a Comment.*$',
+    r'No comments:.*$', r'Labels?:.*$',
+    r'Picture Window theme.*$', r'Powered by Blogger.*$',
+    r'Home\s+About\s+Privacy.*$',
+    r'©\d{4}.*$', r'Followers.*$', r'About Me.*$',
+    r'\d{4}\s*►.*$',  # Year archive entries
+    r'►\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)',
+]
+
+
+def _clean_content(text):
+    """Remove navigation, tags, dates, blog boilerplate from text."""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Skip lines matching noise patterns
+        skip = False
+        for pattern in _NOISE_PATTERNS:
+            if re.search(pattern, line, re.IGNORECASE):
+                skip = True
+                break
+        if skip:
+            continue
+        # Skip very short lines (likely navigation fragments)
+        if len(line) < 15 and not line[0].isupper():
+            continue
+        cleaned.append(line)
+    result = "\n".join(cleaned)
+    # Remove repeated boilerplate blocks
+    result = re.sub(r'(?:Blog Archive|Newer Post|Older Post|Subscribe to).*', '', result, flags=re.DOTALL)
+    return result.strip()[:4000]
+
+
 def _query_variants(query, query_type="general"):
     """Generate query variants based on query type."""
     SUFFIXES = {
@@ -128,36 +172,52 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None):
     return validated, alive_count
 
 
-def _deep_read_and_extract(pages, top_n=8, verbose=True, log=None):
-    """Deep-read pages: fetch full content + extract images from raw HTML."""
+def _deep_read_and_extract(pages, top_n=10, verbose=True, log=None):
+    """Deep-read pages: fetch full content + extract images from raw HTML.
+    Applies content cleaning and domain dedup (max 2 per domain)."""
     deep_pages = []
     all_images = []
-    for p in pages[:top_n]:
+    domain_counts = {}
+    from urllib.parse import urlparse
+
+    for p in pages[:top_n * 2]:  # Over-fetch to compensate for dedup
         url = p.get("url", "")
         if not url:
+            continue
+        dom = urlparse(url).hostname or ""
+        if domain_counts.get(dom, 0) >= 2:
             continue
         if log:
             log(f"    Reading: {url[:60]}...")
         try:
-            # Get raw HTML for image extraction
             raw_html = vwe._fetch(url)
             if not raw_html or len(raw_html) < 300:
                 continue
 
-            # Extract images from raw HTML
             imgs = ddg_search.extract_fullsize_images(raw_html, url)
 
-            # Parse text content for evidence
             from bs4 import BeautifulSoup
             try:
                 soup = BeautifulSoup(raw_html, "lxml")
             except Exception:
                 soup = BeautifulSoup(raw_html, "html.parser")
-            text = soup.get_text(separator=" ", strip=True)[:10000]
+
+            # Remove noise elements before extracting text
+            for tag in soup.find_all(["nav", "footer", "header", "aside", "form", "script", "style"]):
+                tag.decompose()
+            # Remove elements with noise classes
+            for tag in soup.find_all(True):
+                classes = [c.lower() for c in (tag.get("class") or [])]
+                if any(k in classes for k in ["sidebar", "archive", "menu", "navigation", "tags", "labels", "meta"]):
+                    tag.decompose()
+
+            text = soup.get_text(separator="\n", strip=True)
+            text = _clean_content(text)
 
             if text and len(text) > 300:
                 p["deep_text"] = text
                 deep_pages.append(p)
+                domain_counts[dom] = domain_counts.get(dom, 0) + 1
                 for img_url in imgs[:5]:
                     all_images.append({
                         "url": img_url,
@@ -252,10 +312,22 @@ def run_deep_research(query, server_url="http://localhost:8888",
         if level2_urls:
             log(f"  {len(level2_urls)} candidates")
             l2_val, l2_alive = _validate_urls(level2_urls[:30], 30, verbose, log)
+            # Relevance gate + domain dedup
+            domain_counts = {}
+            for p in validated:
+                from urllib.parse import urlparse
+                dom = urlparse(p.get("url", "")).hostname or ""
+                domain_counts[dom] = domain_counts.get(dom, 0) + 1
             for p in l2_val:
                 p["relevance"] = ddg_search.content_relevance_score(query, p.get("text", ""))
+                if p["relevance"] < 0.15:
+                    continue
+                dom = urlparse(p.get("url", "")).hostname or ""
+                if domain_counts.get(dom, 0) >= 2:
+                    continue
+                domain_counts[dom] = domain_counts.get(dom, 0) + 1
                 validated.append(p)
-            level2_count = len(l2_val)
+            level2_count = len([p for p in l2_val if p.get("relevance", 0) >= 0.15])
             alive_count += l2_alive
             validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
         timings["level2"] = round(time.time() - t, 1)
@@ -287,73 +359,44 @@ def run_deep_research(query, server_url="http://localhost:8888",
             "url": p.get("url", ""),
             "title": p.get("title", ""),
             "relevance": round(p.get("relevance", 0), 2),
-            "content": text[:6000] if text else "",
+            "content": text[:4000] if text else "",
         })
     log(f"  Evidence: {len(evidence)} pages ({sum(len(e['content']) for e in evidence)} chars)")
 
-    # Step 10: Multi-pass synthesis
-    log("Synthesizing...")
+    # Step 10: LLM synthesis (conclusions only, not full text)
+    log("Synthesizing conclusions...")
     t = time.time()
 
-    # Pass 1: Extract facts from FULL content
-    facts_parts = []
-    for i, e in enumerate(evidence[:10]):
-        facts_parts.append(f"Source [{i+1}] {e['title']}:\n{e['content'][:3000]}")
-    facts_context = "\n\n".join(facts_parts)
-
-    facts = chat_completion([
-        {"role": "system", "content": "Extract specific facts from research sources. Include names, dates, numbers, titles, career details. Be precise and cite source numbers."},
-        {"role": "user", "content": f"Extract key facts about: {query}\n\n{facts_context}"},
-    ], server_url=server_url, temperature=0.1, max_tokens=3000)
-
-    # Pass 2: Synthesize with images
-    images_text = ""
-    if images:
-        images_text = "\nAvailable images from pages:\n" + "\n".join(
-            f"- ![image]({img['url']})" for img in images[:10]
-        )
-
-    source_list = "\n".join(
-        f"[{i+1}] [{e['title']}]({e['url']})" for i, e in enumerate(evidence[:15])
+    # Give LLM the evidence for context, but tell it to write ONLY conclusions
+    evidence_summary = "\n".join(
+        f"[{i+1}] {e['title']} ({e['relevance']:.0%}) — {len(e['content'])} chars"
+        for i, e in enumerate(evidence[:10])
     )
 
-    synthesis_prompt = f"""Write a comprehensive research report about: {query}
-Query type: {query_type}
+    synthesis = chat_completion([
+        {"role": "system", "content": """You are a research analyst. Write a CONCISE synthesis section for a research report.
 
-Extracted facts from sources:
-{facts}
+The full source articles are included in the report above. Your job is ONLY to write:
+1. Executive summary (3-5 sentences with key findings)
+2. Key takeaways (bullet points with specific facts)
+3. Gaps and limitations (what's missing from the sources)
 
-Sources:
-{source_list}
-{images_text}
-
-Requirements:
-1. Executive summary (3-5 sentences with key facts)
-2. Detailed analysis using SPECIFIC facts from the extracted data (names, dates, numbers, titles)
-3. Include ALL relevant images using ![description](URL) markdown syntax
-4. Key takeaways with specific evidence
-5. Sources section with [N] [Title](URL) clickable links
-
-CRITICAL RULES:
-- Use ONLY facts from the extracted data above, do not fabricate
-- Every claim must cite source number [N]
-- Include actual image URLs from the Available images section
-- Write in the same language as the query
-- Be specific: names, dates, numbers, film titles — not generalities"""
-
-    answer = chat_completion([
-        {"role": "system", "content": "You are an expert researcher. Write detailed reports using ONLY provided facts. Always include images when available."},
-        {"role": "user", "content": synthesis_prompt},
-    ], server_url=server_url, temperature=0.3, max_tokens=5000)
+Do NOT repeat the source content. Do NOT write a full report. Only add analysis and conclusions."""},
+        {"role": "user", "content": f"Research topic: {query}\nQuery type: {query_type}\n\nSources included:\n{evidence_summary}\n\nWrite the synthesis section only."},
+    ], server_url=server_url, temperature=0.3, max_tokens=2000)
 
     timings["synthesis"] = round(time.time() - t, 1)
     log(f"  Done ({timings['synthesis']}s)")
+
+    # Step 11: Build final report (articles + images + synthesis)
+    log("Building report...")
+    report = _build_report(query, query_type, evidence, images, synthesis, timings)
 
     total_time = round(time.time() - start_total, 1)
     log(f"\nTotal: {total_time}s")
 
     return {
-        "report": answer or "_Error: synthesis failed_",
+        "report": report,
         "stats": {
             "query": query,
             "query_type": query_type,
@@ -369,3 +412,43 @@ CRITICAL RULES:
         "sources": [{"url": e["url"], "title": e["title"], "relevance": e["relevance"]}
                      for e in evidence],
     }
+
+
+def _build_report(query, query_type, evidence, images, synthesis, timings):
+    """Build report: articles + images + LLM synthesis."""
+    from datetime import datetime
+
+    parts = []
+
+    # Header
+    parts.append(f"# {query}\n")
+    parts.append(f"**Query type:** {query_type} | **Sources:** {len(evidence)} | **Images:** {len(images)} | **Time:** {timings.get('total', 0)}s\n")
+
+    # Source articles (full cleaned text)
+    parts.append("---\n")
+    parts.append("## Sources\n")
+    for i, e in enumerate(evidence):
+        if e.get("content"):
+            parts.append(f"### [{i+1}] {e['title']}")
+            parts.append(f"*{e['url']}*\n")
+            parts.append(e["content"])
+            parts.append("\n---\n")
+
+    # Images
+    if images:
+        parts.append("## Images\n")
+        for img in images[:12]:
+            parts.append(f"![{img.get('title', 'image')}]({img['url']})")
+        parts.append("")
+
+    # LLM synthesis
+    parts.append("## Analysis & Conclusions\n")
+    parts.append(synthesis or "_No synthesis available_\n")
+
+    # Sources footer
+    parts.append("---\n")
+    parts.append("## All Sources\n")
+    for i, e in enumerate(evidence):
+        parts.append(f"{i+1}. [{e['title']}]({e['url']})")
+
+    return "\n".join(parts)
