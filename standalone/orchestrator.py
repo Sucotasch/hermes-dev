@@ -14,6 +14,84 @@ import visit_website_enhanced as vwe
 from llm_client import chat_completion, classify_query_type, enrich_query
 
 
+# ── Readability-style content extractor ──────────────────────────────────────
+def _extract_main_content(html):
+    """Extract main article content from HTML, removing nav/sidebar/footer/ads.
+
+    Simplified Mozilla Readability algorithm:
+    1. Find all candidate elements (div, article, section, main)
+    2. Score by text length, link density (lower = better), paragraph count
+    3. Return the text of the highest-scoring element
+    """
+    from bs4 import BeautifulSoup
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    # Remove noise elements first
+    for tag in soup.find_all(["script", "style", "noscript", "iframe", "svg"]):
+        tag.decompose()
+
+    # Score candidate containers
+    candidates = []
+    for tag in soup.find_all(["article", "main", "section", "div"]):
+        # Skip tiny elements
+        text = tag.get_text(strip=True)
+        if len(text) < 200:
+            continue
+
+        # Score: text length + paragraph count - link density penalty
+        text_len = len(text)
+        paragraphs = len(tag.find_all("p"))
+        links = len(tag.find_all("a"))
+        link_density = links / max(text_len / 100, 1)  # links per 100 chars
+
+        # Bonus for semantic tags
+        tag_bonus = 0
+        if tag.name == "article":
+            tag_bonus = 200
+        elif tag.name == "main":
+            tag_bonus = 150
+        elif tag.name == "section":
+            tag_bonus = 50
+
+        # Penalty for noise classes
+        classes = [c.lower() for c in (tag.get("class") or [])]
+        noise_penalty = 0
+        if any(k in classes for k in ["sidebar", "menu", "nav", "footer", "header",
+                                       "comment", "social", "share", "related", "recommend"]):
+            noise_penalty = 500
+
+        score = text_len + paragraphs * 50 - link_density * 100 + tag_bonus - noise_penalty
+        candidates.append((score, tag))
+
+    if not candidates:
+        # Fallback: return all text
+        return soup.get_text(separator="\n", strip=True)[:5000]
+
+    # Pick the best candidate
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_tag = candidates[0][1]
+
+    # Remove noise from the best container
+    for tag in best_tag.find_all(["nav", "footer", "header", "aside", "form",
+                                   "script", "style", "table"]):
+        tag.decompose()
+    for tag in best_tag.find_all(True):
+        classes = [c.lower() for c in (tag.get("class") or [])]
+        if any(k in classes for k in ["sidebar", "menu", "nav", "comment", "social",
+                                       "share", "related", "recommend", "tags", "labels"]):
+            tag.decompose()
+    # Remove short link-only elements
+    for a in best_tag.find_all("a"):
+        a_text = a.get_text(strip=True)
+        if len(a_text) < 15:
+            a.decompose()
+
+    return best_tag.get_text(separator="\n", strip=True)[:5000]
+
+
 # Boilerplate patterns to strip from content
 _NOISE_LINES = [
     r'Posted by \w+ at \d+:\d+', r'Email This BlogThis!', r'Share to \w+',
@@ -198,36 +276,8 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None):
 
             imgs = ddg_search.extract_fullsize_images(raw_html, url)
 
-            from bs4 import BeautifulSoup
-            try:
-                soup = BeautifulSoup(raw_html, "lxml")
-            except Exception:
-                soup = BeautifulSoup(raw_html, "html.parser")
-
-            # Remove structural noise tags (NOT <a> — they contain image links)
-            for tag in soup.find_all(["nav", "footer", "header", "aside", "form",
-                                      "script", "style", "noscript", "iframe",
-                                      "svg", "figure", "figcaption"]):
-                tag.decompose()
-            # Remove elements by class
-            NOISE_CLASSES = {"sidebar", "archive", "menu", "navigation", "tags",
-                            "labels", "meta", "breadcrumb", "pagination", "social",
-                            "share", "follow", "subscribe", "related", "recommend",
-                            "comment", "discussion", "footer", "header", "nav",
-                            "widget", "plugin", "advertisement", "promo", "banner"}
-            for tag in soup.find_all(True):
-                classes = [c.lower() for c in (tag.get("class") or [])]
-                if any(k in classes for k in NOISE_CLASSES):
-                    tag.decompose()
-            # Remove elements by ID
-            NOISE_IDS = {"sidebar", "footer", "header", "nav", "menu", "comments",
-                        "social", "share", "subscribe", "related", "recommend"}
-            for tag in soup.find_all(True):
-                tag_id = (tag.get("id") or "").lower()
-                if any(k in tag_id for k in NOISE_IDS):
-                    tag.decompose()
-
-            text = soup.get_text(separator="\n", strip=True)
+            # Extract main content using Readability-style algorithm
+            text = _extract_main_content(raw_html)
             text = _clean_content(text)
 
             # Relevance filter: skip pages with no useful content
