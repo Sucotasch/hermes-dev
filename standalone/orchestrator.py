@@ -14,20 +14,24 @@ import visit_website_enhanced as vwe
 from llm_client import chat_completion, classify_query_type, enrich_query
 
 
-def _query_variants(query):
-    """Generate query variants."""
-    try:
-        import query_variants
-        generated = query_variants.generate(query)
-        if generated:
-            return generated
-    except Exception:
-        pass
+def _query_variants(query, query_type="general"):
+    """Generate query variants based on query type."""
+    # Query-type specific suffixes
+    SUFFIXES = {
+        "person": ["career biography", "filmography movies", "personal life interview", "aliases real name"],
+        "technical": ["documentation guide", "tutorial examples", "best practices"],
+        "visual": ["photos gallery portfolio", "high resolution", "original artwork"],
+        "historical": ["detailed history", "timeline chronology", "archival sources"],
+        "news": ["latest news", "recent developments", "current status"],
+        "comparison": ["vs alternative", "pros cons", "detailed comparison"],
+        "general": ["detailed analysis", "comprehensive guide", "expert overview"],
+    }
+
+    suffixes = SUFFIXES.get(query_type, SUFFIXES["general"])
     base = [query]
-    tokens = [t for t in re.findall(r'\b\w+\b', query.lower()) if len(t) > 3]
-    for t in tokens[:3]:
-        base += [f'{t} detailed analysis', f'{t} expert overview', f'{t} comprehensive guide']
-    return base[:6]
+    for s in suffixes[:3]:
+        base.append(f"{query} {s}")
+    return base[:5]
 
 
 def _validate_urls(urls, max_validate=100, verbose=True, log=None):
@@ -138,7 +142,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     t = time.time()
     all_results = []
     seen_urls = set()
-    variants = _query_variants(enriched_query)
+    variants = _query_variants(enriched_query, query_type)
 
     for i, q in enumerate(variants[:6]):
         r = ddg_search.web_search(q, count=50, region="wt-wt", safe="auto")
@@ -182,7 +186,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 page = vwe.visit_website(url, max_chars=5000)
                 for link in page.get("links", []):
                     href = link.get("url", "")
-                    if href and href not in seen_urls:
+                    if href and href not in seen_urls and not ddg_search.is_blocked_domain(href):
                         seen_urls.add(href)
                         level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
             except Exception:
