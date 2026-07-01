@@ -417,21 +417,16 @@ class HermesGUI(QMainWindow):
         row_proxy = QHBoxLayout()
         self.chk_proxy = QCheckBox("Proxy")
         self.chk_proxy.setChecked(True)
-        self.chk_proxy.toggled.connect(self._on_proxy_changed)
         row_proxy.addWidget(self.chk_proxy)
 
         row_proxy.addWidget(QLabel("URL:"))
         self.txt_proxy = QLineEdit("http://127.0.0.1:2080")
         self.txt_proxy.setPlaceholderText("http://host:port")
         self.txt_proxy.setMaximumWidth(220)
-        self.txt_proxy.editingFinished.connect(self._on_proxy_changed)
         row_proxy.addWidget(self.txt_proxy)
 
         row_proxy.addStretch()
         sa_lay.addLayout(row_proxy)
-
-        # Apply initial proxy env vars
-        self._on_proxy_changed()
 
         root.addWidget(grp_sa)
 
@@ -525,18 +520,6 @@ class HermesGUI(QMainWindow):
         self.lbl_conn_status.setStyleSheet("")
         self.cmb_model.clear()
         self.cmb_model.addItem("local")
-
-    def _on_proxy_changed(self):
-        """Set env vars from proxy settings — both backend modules read these."""
-        import os
-        if self.chk_proxy.isChecked():
-            url = self.txt_proxy.text().strip()
-            if url:
-                os.environ["HTTPS_PROXY"] = url
-                os.environ["HTTP_PROXY"] = url
-        else:
-            os.environ.pop("HTTPS_PROXY", None)
-            os.environ.pop("HTTP_PROXY", None)
 
     def _on_test_connection(self):
         url = self.txt_server.text().strip()
