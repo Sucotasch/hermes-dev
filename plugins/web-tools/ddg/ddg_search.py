@@ -1577,8 +1577,8 @@ def content_relevance_score(query, text):
     """Score how relevant a page's text content is to the query.
 
     Returns 0.0-1.0. Higher = more relevant.
-    Person queries: entity phrase (all words except last) must appear as substring.
-    Topic queries: word-overlap scoring (flexible).
+    Requires at least one 2-word phrase match to prevent false positives
+    from single-word overlap (e.g., "sara" + "james" in unrelated context).
     """
     if not text:
         return 0.0
@@ -1587,20 +1587,17 @@ def content_relevance_score(query, text):
         return 0.0
     text_lower = text.lower()[:10000]
 
-    # Detect person query: all words are short (names have short words)
-    is_person = all(len(w) <= 5 for w in query_words)
+    # Require at least one 2-word phrase match
+    has_phrase = False
+    for i in range(len(query_words) - 1):
+        phrase = f"{query_words[i]} {query_words[i+1]}"
+        if phrase in text_lower:
+            has_phrase = True
+            break
+    if not has_phrase and len(query_words) >= 2:
+        return 0.0
 
-    if is_person and len(query_words) >= 2:
-        # Person query: entity phrase = all words except the last (context word like "model")
-        # "Sara St James model" → entity = "sara st james"
-        # "Python tutorial" → entity = "python" (only 1 word, skip)
-        entity_words = [w.lower() for w in re.findall(r'\b\w+\b', query)]
-        entity_phrase = " ".join(entity_words[:-1]) if len(entity_words) > 1 else entity_words[0]
-        norm_entity = re.sub(r'\.', '', entity_phrase)
-        norm_text = re.sub(r'\.', '', text_lower)
-        if norm_entity not in norm_text:
-            return 0.0
-
+    # Single word scoring (with phrase requirement above)
     hits = sum(1 for w in query_words if w in text_lower)
     base_score = hits / len(query_words)
     if len(text) < 200:
