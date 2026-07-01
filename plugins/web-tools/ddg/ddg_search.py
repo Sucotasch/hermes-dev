@@ -1690,6 +1690,26 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     # Filter blocked domains before validation (saves N network requests)
     all_raw = [item for item in all_raw if not is_blocked_domain(item.get("url", ""), query_type)]
 
+    # Filter homepages and search result pages (saves validation time)
+    _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
+    _SEARCH_PATTERNS = ("/search", "search?q=", "search?s=", "/images/search")
+    _filtered_out = []
+    _kept = []
+    for item in all_raw:
+        url = item.get("url", "")
+        try:
+            parsed = urllib.parse.urlparse(url)
+            path = parsed.path.strip("/").lower()
+            url_lower = url.lower()
+            if path in _HOMEPAGE_PATHS or any(p in url_lower for p in _SEARCH_PATTERNS):
+                _filtered_out.append(url)
+            else:
+                _kept.append(item)
+        except Exception:
+            _kept.append(item)
+    if _filtered_out:
+        all_raw = _kept
+
     if not query_variants and raw_count < max_validate and _QUERY_VARIANTS_MODULE:
         try:
             suggested = _QUERY_VARIANTS_MODULE._suggest_query_variants(query, all_raw, max_variants=3)
