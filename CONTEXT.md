@@ -404,19 +404,21 @@ PyQt5 unified control center with two modes:
 - Proxy file persistence (`~/.hermes/proxy.env`) ✓
 
 ### What's ONLY in standalone orchestrator (NOT in Hermes mode)
-These features improve quality but are missing from `search_deep()` backend:
 
-| Feature | Impact on Hermes | Effort to add |
-|---------|------------------|---------------|
-| Domain quarantine (block/defer) | Skip blocked domains faster | Medium |
-| Platform-aware dedup | Allow multiple blogspot/livejournal blogs | Low |
-| Mirror domains (bunkr.fi/ci/ax) | Prevent duplicate mirror content | Low |
-| Query string dedup (?m=0, ?m=1) | Prevent mobile/desktop duplicates | Low |
-| Keywords check | Better relevance filtering | Medium |
-| img_bonus for visual queries | Gallery detection for visual searches | Medium |
-| GettyImages filter for person queries | Avoid wrong person results | Low |
-| `_extract_main_content()` NoneType fix | Prevent crashes on malformed HTML | Low |
-| Evidence selection improvements | Better evidence quality | Medium |
+**Used in deep-read phase (after search_deep returns):**
+- Platform-aware dedup — different blogs on same platform treated separately
+- Mirror domains — bunkr.fi/ci/ax as one domain
+- Query string dedup — ?m=0, ?m=1 mobile/desktop variants
+- `_extract_main_content()` NoneType fix — prevents crashes on malformed HTML
+- Keywords check — phrase-based relevance filtering
+- img_bonus — gallery detection for visual queries
+- GettyImages filter — exclude for person queries
+- Evidence selection improvements
+
+**Used in validation phase (could benefit Hermes):**
+- Domain quarantine — skip domains with 2+ blocked URLs
+
+**Note:** Platform dedup, mirror domains, query string dedup are used in `_deep_read_and_extract()` which runs AFTER `search_deep()` returns. These are NOT appropriate for `search_deep()` because they operate on different data (deep-read results vs URL collection).
 
 ### What's ONLY in Hermes wrapper (NOT in standalone)
 - `_apply_post_retrieval_filter()` — Jaccard-based dedup + source quotas
@@ -424,4 +426,6 @@ These features improve quality but are missing from `search_deep()` backend:
 - `_is_coverage_sufficient()` — check if enough diverse sources
 
 ### Recommendation
-Add platform-aware dedup, mirror domains, and query string dedup to `search_deep()` backend. These are low-effort, high-impact improvements that benefit both modes.
+- **Domain quarantine** in `search_deep()` — would benefit Hermes by skipping blocked domains faster
+- Platform dedup, mirror domains, query string dedup — NOT appropriate for `search_deep()` (different phase in standalone)
+- These features are standalone-specific (deep-read phase) and don't need to be in backend
