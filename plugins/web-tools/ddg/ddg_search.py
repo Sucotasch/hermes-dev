@@ -246,7 +246,7 @@ def _detect_blocked(html):
         return True
     html_lower = html.lower()
     block_indicators = [
-        'cf-chl-check', 'checking your browser', 'captcha', 'security check',
+        'cf-chl-check', 'checking your browser',
         'please verify you are human', 'access denied', 'forbidden',
         '403 forbidden', '429 too many', '503 service unavailable',
         'challenge-platform', 'cdn-cgi',
@@ -256,6 +256,15 @@ def _detect_blocked(html):
         'javascript is disabled', 'enable javascript and then reload',
         'you need to enable javascript', 'requires javascript',
     ]
+    # Check for actual captcha forms (not just config mentions)
+    if 'captcha' in html_lower:
+        # Only flag if captcha appears in visible context, not JS config
+        if '<form' in html_lower and 'captcha' in html_lower:
+            return True
+        if 'please complete the captcha' in html_lower or 'enter the captcha' in html_lower:
+            return True
+        if 'hcaptcha' in html_lower and 'challenge' in html_lower:
+            return True
     for ind in block_indicators:
         if ind in html_lower:
             return True
@@ -483,21 +492,27 @@ def web_search(query, page=1, count=5, region="wt-wt", safe="auto"):
         ("jina-duckduckgo", lambda: _search_jina(query, page, count)),
     ]
 
+    import time as _time
+
     for name, strategy in strategies:
-        try:
-            result = strategy()
-        except Exception as exc:
-            exc_str = str(exc).lower()
-            print(f"[ddg-search] Strategy '{name}' failed: {exc}", file=sys.stderr)
-            # DNS circuit breaker: if DNS fails, skip remaining network-dependent strategies
-            if "getaddrinfo" in exc_str or "name or service not known" in exc_str:
-                print(f"[ddg-search] DNS failure detected, skipping remaining strategies", file=sys.stderr)
+        result = None
+        for attempt in range(2):
+            try:
+                result = strategy()
+            except Exception as exc:
+                print(f"[ddg-search] Strategy '{name}' attempt {attempt+1} failed: {exc}", file=sys.stderr)
+                if attempt == 0:
+                    _time.sleep(2)
+                continue
+            if result and result.get("results"):
+                result["_source"] = name
+                return result
+            if attempt == 0:
+                print(f"[ddg-search] Strategy '{name}' returned no results, retrying...", file=sys.stderr)
+                _time.sleep(2)
+            else:
+                print(f"[ddg-search] Strategy '{name}' returned no results (final)", file=sys.stderr)
                 break
-            continue
-        if result and result.get("results"):
-            result["_source"] = name
-            return result
-        print(f"[ddg-search] Strategy '{name}' returned no results", file=sys.stderr)
 
     return {"error": "All search strategies failed", "results": [], "count": 0}
 
@@ -911,6 +926,8 @@ BLOCKED_DOMAINS = {
     # SEO spam / content farms
     "zippia.com", "rocketreach.co", "signalhire.com",
     "zoominfo.com", "apollo.io", "hunter.io",
+    # Adult / porn aggregators (no useful content for research)
+    "netporntube.com",
     # Redirect / shorteners (non-content)
     "t.co", "bit.ly", "tinyurl.com", "ow.ly", "is.gd", "buff.ly",
     "cutt.ly", "shorturl.at",
@@ -1492,6 +1509,35 @@ def _check_url_live(url, timeout=10):
     except Exception as e:
         result["error"] = str(e)
         return result
+
+    # Proxy retry for dead sites (DNS/timeout errors only, not JS/captcha)
+    if not result["alive"] and not result.get("blocked"):
+        error = result.get("error", "")
+        if any(k in error.lower() for k in ["getaddrinfo", "timeout", "failed to resolve", "name or service"]):
+            try:
+                import curl_cffi
+                proxy_url = "http://127.0.0.1:2080"
+                proxy_session = curl_cffi.requests.Session(
+                    impersonate=random.choice(IMPERSONATE_POOL),
+                    proxies={"http": proxy_url, "https": proxy_url},
+                    verify=False, timeout=timeout,
+                )
+                proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
+                if proxy_resp.status_code < 400:
+                    raw = proxy_resp.text
+                    if raw and not _detect_blocked(raw) and len(raw) > 500:
+                        result["status"] = proxy_resp.status_code
+                        result["body"] = raw
+                        text = re.sub(r'<[^>]+>', ' ', raw)
+                        text = re.sub(r'\s+', ' ', text).strip()
+                        result["text_length"] = len(text)
+                        result["text_words"] = len(re.findall(r'\w+', text))
+                        if result["text_length"] >= 500 and result["text_words"] >= 50:
+                            result["alive"] = True
+                            result["error"] = None
+                            return result
+            except Exception:
+                pass
 
     return result
 

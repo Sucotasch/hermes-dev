@@ -434,11 +434,11 @@ def run_deep_research(query, server_url="http://localhost:8888",
         log(f"  +{level2_count} pages ({timings.get('level2', 0)}s)")
 
     # Step 7: Deep-read + extract images from pages
-    # Re-sort by relevance after Level 2 expansion
-    validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+    # Sort by text length to process content-rich pages first (avoids domain dedup killing better pages)
+    validated.sort(key=lambda x: len(x.get("text", "")), reverse=True)
     log("Deep-reading & extracting images from pages...")
     t = time.time()
-    deep_pages, page_images = _deep_read_and_extract(validated[:25], top_n=20, query=query, verbose=verbose, log=log)
+    deep_pages, page_images = _deep_read_and_extract(validated, top_n=20, query=query, verbose=verbose, log=log)
     timings["deep_read"] = round(time.time() - t, 1)
     log(f"  {len(deep_pages)} pages read, {len(page_images)} images extracted ({timings['deep_read']}s)")
 
@@ -446,7 +446,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     seen_imgs = set()
     images = []
     relevant_urls = set()
-    for p in validated[:25]:
+    for p in validated:
         snippet = p.get("snippet", "") or p.get("text", "")[:500]
         if ddg_search.content_relevance_score(query, snippet) >= 0.15:
             relevant_urls.add(p.get("url"))
@@ -460,12 +460,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
     images = images[:10]
     log(f"  {len(images)} unique full-size images")
 
-    # Step 9: Build evidence — score by original snippet, include cleaned content
+    # Step 9: Build evidence — only pages with actual content
     evidence = []
-    for p in validated[:25]:
+    for p in validated:
         text = p.get("deep_text") or p.get("text", "")
-        # Score by original snippet (not cleaned text which loses keywords)
-        snippet = p.get("snippet", "") or p.get("text", "")[:500]
+        if not text or len(text) < 100:
+            continue
+        snippet = p.get("snippet", "") or text[:500]
         relevance = round(ddg_search.content_relevance_score(query, snippet), 2)
         if relevance < 0.15:
             continue
@@ -473,7 +474,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
             "url": p.get("url", ""),
             "title": p.get("title", ""),
             "relevance": relevance,
-            "content": text[:4000] if text else "",
+            "content": text[:4000],
         })
     log(f"  Evidence: {len(evidence)} pages ({sum(len(e['content']) for e in evidence)} chars)")
 
@@ -481,22 +482,27 @@ def run_deep_research(query, server_url="http://localhost:8888",
     log("Synthesizing conclusions...")
     t = time.time()
 
-    # Give LLM the evidence for context, but tell it to write ONLY conclusions
-    evidence_summary = "\n".join(
-        f"[{i+1}] {e['title']} ({e['relevance']:.0%}) — {len(e['content'])} chars"
-        for i, e in enumerate(evidence[:10])
-    )
+    # Give LLM the evidence content for synthesis
+    evidence_content = ""
+    for i, e in enumerate(evidence[:10]):
+        content_preview = e['content'][:1500] if e['content'] else ""
+        evidence_content += f"\n--- Source {i+1}: {e['title']} ---\n{content_preview}\n"
 
     synthesis = chat_completion([
-        {"role": "system", "content": """You are a research analyst. Write a CONCISE synthesis section for a research report.
+        {"role": "system", "content": """You are a research analyst writing a synthesis for a deep research report.
 
-The full source articles are included in the report above. Your job is ONLY to write:
-1. Executive summary (3-5 sentences with key findings)
-2. Key takeaways (bullet points with specific facts)
-3. Gaps and limitations (what's missing from the sources)
+The source articles above contain factual information about the topic. Extract and synthesize ALL relevant facts from the sources into:
 
-Do NOT repeat the source content. Do NOT write a full report. Only add analysis and conclusions."""},
-        {"role": "user", "content": f"Research topic: {query}\nQuery type: {query_type}\n\nSources included:\n{evidence_summary}\n\nWrite the synthesis section only."},
+1. Executive summary (3-5 sentences with key findings from the sources)
+2. Key takeaways (bullet points with specific facts extracted from the sources - names, dates, details, filmography, career milestones)
+3. Gaps and limitations (what information is genuinely NOT present in any source)
+
+CRITICAL RULES:
+- Extract facts that ARE present in the sources. Do NOT claim information is missing if it appears in any source.
+- Use specific details: names, dates, film titles, career facts.
+- If a source contains biographical data, include it in the takeaways.
+- Only list gaps for information that truly cannot be found in ANY of the provided sources."""},
+        {"role": "user", "content": f"Research topic: {query}\nQuery type: {query_type}\n\nSources:\n{evidence_content}\n\nWrite the synthesis section."},
     ], server_url=server_url, temperature=0.3, max_tokens=2000)
 
     timings["synthesis"] = round(time.time() - t, 1)

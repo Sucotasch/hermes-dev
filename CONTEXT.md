@@ -242,3 +242,45 @@ After Level 1 (`web_search_deep`):
 - Introduced `query_type` as the single source of intent policy, defined by the LLM before tool call; backend is policy-free.
 - Bot-challenge detection retained as metadata-only tagger (`bot_challenge`); synthesis side excludes these pages from final answer.
 - **2026-06-12:** Removed `_is_visual_topic()`, replaced with `query_type == "visual"`. Added impersonation rotation, DNS circuit breaker, proxy retry, content relevance scoring, domain blocklist, full-size image extraction, JS data extraction, overlay bypass expansion.
+
+## Session 2026-07-01: Standalone pipeline fixes
+
+### Changes made to ddg_search.py
+1. **netporntube.com added to BLOCKED_DOMAINS** — adult aggregator with no useful content
+2. **DNS circuit breaker removed** — `break` on getaddrinfo error was too aggressive, skipping valid strategies
+3. **Retry logic added to web_search** — 2 attempts per strategy with 2s delay between retries
+4. **`_detect_blocked` fix** — "captcha" no longer matches JS config variables (e.g., `wgconfirmeditcaptchaneededforgenericedit` on Wikipedia). Only matches visible captcha forms.
+5. **Proxy retry for dead sites** — when site is dead (not blocked) with DNS/timeout errors, try NECOBOX proxy at 127.0.0.1:2080 as last resort
+
+### Changes made to orchestrator.py
+1. **25-page limit removed** — `validated[:25]` → `validated` (process all alive pages)
+2. **Step 9 content filter** — require `len(text) >= 100` to prevent empty pages in evidence
+3. **Sort by text_length** — `validated.sort(key=lambda x: len(x.get("text", "")), reverse=True)` ensures content-rich pages processed first (prevents domain dedup killing better versions like ru.kinorium.com vs en.kinorium.com)
+4. **LLM prompt fixed** — now includes actual source content (1500 chars each) instead of just titles/scores. LLM synthesizes facts from sources.
+
+### Key findings
+- **DDG engine classes intermittent failure** — Duckduckgo/Yahoo/Yandex/Mojeek sometimes return 0 results due to DNS. DDGS().text() more reliable. Retry helps.
+- **`_detect_blocked` false positive** — Wikipedia HTML contains "captcha" in JS config (`wgconfirmeditcaptchaneededforgenericedit`), not in visible content. Fixed by checking for visible captcha forms only.
+- **Domain dedup kills better pages** — `ru.kinorium.com` (39K chars) blocked by `en.kinorium.com` (3K chars) due to base domain normalization. Fixed by sorting by text_length before deep-read.
+- **LLM synthesis missing source content** — old prompt sent only titles/scores. Fixed to include 1500 chars of actual content per source.
+- **NECOBOX proxy available** — `visit_website_enhanced.py` has `USE_PROXY=False`, `PROXY_URL="http://127.0.0.1:2080"`. Added proxy retry for DNS/timeout dead sites only (not JS/captcha).
+- **Step 9 evidence filter** — `p.get("deep_text") or p.get("text", "")` allowed empty pages. Fixed: require `len(text) >= 100`.
+
+### DDG search behavior
+- DDG results are non-deterministic — same query returns different URLs between runs
+- babepedia appears sometimes but not consistently for "Jacqueline Lovell" queries
+- Enriched query with "Sara St James" increases chance of finding babepedia
+- Engine classes (Duckduckgo, Yahoo, Yandex, Mojeek) intermittently fail with 0 results
+- DDGS().text() is more reliable but returns fewer results
+
+### Standalone app files
+```
+standalone/
+  orchestrator.py     <- pipeline: classify → search → validate → L2 → deep-read → synthesize
+  deep_research.py    <- CLI entry point
+  llm_client.py       <- llama.cpp HTTP client (OpenAI-compatible API)
+  README.md
+```
+
+### Test reports location
+`reports/` directory contains historical test runs
