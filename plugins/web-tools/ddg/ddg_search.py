@@ -1952,20 +1952,15 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
                 alive_count += 1
 
             # ── Step 3: Content analysis for live pages ──
-            # Use Readability to extract main content, then clean noise
+            # Raw text extraction (Readability is applied later in deep-read phase)
             body_html = check.get('body') or ''
             try:
-                text = _extract_main_content(body_html)
-                text = _clean_content(text)
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(body_html, 'html.parser')
+                text = soup.get_text(separator=' ', strip=True)
             except Exception:
-                # Fallback: raw text extraction
-                try:
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(body_html, 'html.parser')
-                    text = soup.get_text(separator=' ', strip=True)
-                except Exception:
-                    text = re.sub(r'<[^>]+>', ' ', body_html)
-                    text = re.sub(r'\s+', ' ', text).strip()
+                text = re.sub(r'<[^>]+>', ' ', body_html)
+                text = re.sub(r'\s+', ' ', text).strip()
 
             res_out = dict(res)
             res_out['alive'] = True
