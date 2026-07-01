@@ -176,17 +176,22 @@ def _query_variants_wrapper(query):
     return base
 
 
-def _compact_evidence(pages, max_per_page=500):
-    """Compress evidence pack: first paragraph + metadata instead of full text.
+def _compact_evidence(pages, max_per_page=1500):
+    """Compress evidence pack: first two paragraphs + metadata instead of full text.
 
-    Reduces token usage for small context windows (96k models).
     Returns compact list with summary, url, title, relevance.
+    1500 chars balances context usage (25 pages × 1500 = 37,500 chars) with
+    content depth for local 92k models (72k usable after Hermes overhead).
     """
     compact = []
     for p in pages:
         text = p.get("text", "")
-        # First paragraph is most informative
-        summary = text.split("\n\n")[0][:max_per_page] if text else ""
+        if text:
+            # Take first two paragraphs for better coverage
+            paragraphs = text.split("\n\n")
+            summary = "\n\n".join(paragraphs[:2])[:max_per_page]
+        else:
+            summary = ""
         compact.append({
             "url": p.get("url", ""),
             "title": p.get("title", ""),
