@@ -309,6 +309,134 @@ def _is_valid_content(html):
                     return False
     return True
 
+
+# ── Readability-style content extractor ──────────────────────────────────────
+def _extract_main_content(html):
+    """Extract main article content from HTML, removing nav/sidebar/footer/ads.
+
+    Simplified Mozilla Readability algorithm:
+    1. Find all candidate elements (div, article, section, main)
+    2. Score by text length, link density (lower = better), paragraph count
+    3. Return the text of the highest-scoring element
+    """
+    from bs4 import BeautifulSoup
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    # Remove noise elements first
+    for tag in soup.find_all(["script", "style", "noscript", "iframe", "svg"]):
+        tag.decompose()
+
+    # Score candidate containers
+    candidates = []
+    for tag in soup.find_all(["article", "main", "section", "div"]):
+        text = tag.get_text(strip=True)
+        if len(text) < 200:
+            continue
+        if tag.attrs is None:
+            continue
+
+        text_len = len(text)
+        paragraphs = len(tag.find_all("p"))
+        links = len(tag.find_all("a"))
+        link_density = links / max(text_len / 100, 1)
+
+        tag_bonus = 0
+        if tag.name == "article":
+            tag_bonus = 200
+        elif tag.name == "main":
+            tag_bonus = 150
+        elif tag.name == "section":
+            tag_bonus = 50
+
+        classes = [c.lower() for c in (tag.get("class") or [])]
+        noise_penalty = 0
+        if any(k in classes for k in ["sidebar", "menu", "nav", "footer", "header",
+                                       "comment", "social", "share", "related", "recommend"]):
+            noise_penalty = 500
+
+        archive_penalty = 0
+        text_lower = text.lower()
+        if re.search(r'(?:archive|calendar|blog archive|◄|►)', text_lower):
+            archive_penalty = 300
+        if re.search(r'(?:january|february|march|april|may|june|july|august|september|october|november|december)\s*\d{4}', text_lower):
+            archive_penalty += 200
+
+        score = text_len + paragraphs * 50 - link_density * 100 + tag_bonus - noise_penalty - archive_penalty
+        candidates.append((score, tag))
+
+    if not candidates:
+        return soup.get_text(separator="\n", strip=True)[:5000]
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_tag = candidates[0][1]
+
+    for tag in best_tag.find_all(["nav", "footer", "header", "aside", "form",
+                                   "script", "style", "table"]):
+        tag.decompose()
+    for tag in best_tag.find_all(True):
+        if tag.attrs is None:
+            continue
+        classes = [c.lower() for c in (tag.get("class") or [])]
+        if any(k in classes for k in ["sidebar", "menu", "nav", "comment", "social",
+                                       "share", "related", "recommend", "tags", "labels"]):
+            tag.decompose()
+    for a in best_tag.find_all("a"):
+        a_text = a.get_text(strip=True)
+        if len(a_text) < 15:
+            a.decompose()
+
+    return best_tag.get_text(separator="\n", strip=True)[:5000]
+
+
+# Boilerplate patterns to strip from content
+_NOISE_LINES = [
+    r'Posted by \w+ at \d+:\d+', r'Email This BlogThis!', r'Share to \w+',
+    r'Blog Archive', r'Newer Post', r'Older Post', r'Subscribe to:',
+    r'Post a Comment', r'No comments:', r'Labels?:', r'Powered by',
+    r'Picture Window theme', r'©\d{4}', r'Followers', r'About Me',
+    r'View web version', r'Home\s+About\s+Privacy', r'Desktop Version',
+    r'Mobile Version', r'Login to add', r'Have your say',
+    r'Edit Page', r'Help keep', r'Recommended$', r'Six Degrees',
+    r'Contributors$', r'Top Contributors', r'Follow .* on Facebook',
+    r'(\d{4}\s*►|►\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))',
+    r'Original Resolution:', r'Jump to navigation', r'Jump to search',
+    r'Picture Of', r'See more ideas',
+]
+_NOISE_RE = re.compile('|'.join(_NOISE_LINES), re.IGNORECASE)
+
+_NOISE_BLOCKS = {
+    'about', 'faq', 'copyright policy', 'privacy notice', 'terms of service',
+    'remove ads', 'cookie policy', 'contact us', 'advertise',
+    'what is', 'there are some things', 'we would also be interested',
+    'discussions', 'have your say', 'be the first to make a comment',
+}
+
+
+def _clean_content(text):
+    """Aggressively remove navigation, tags, boilerplate from text."""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        line = line.strip()
+        if not line or len(line) < 10:
+            continue
+        if _NOISE_RE.search(line):
+            continue
+        if len(line) < 40 and any(w in line.lower() for w in _NOISE_BLOCKS):
+            continue
+        if line.startswith('http') and ' ' not in line:
+            continue
+        cleaned.append(line)
+    result = '\n'.join(cleaned)
+    result = re.sub(r'(?:Blog Archive|Newer Post|Older Post|Subscribe to|Picture Window).*', '', result, flags=re.DOTALL)
+    return result.strip()[:4000]
+
+
 # ── Jina fallback ──────────────────────────────────────────────────────────
 def _fetch_jina(url):
     """Try Jina Reader as fallback for blocked pages."""
@@ -1824,14 +1952,20 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
                 alive_count += 1
 
             # ── Step 3: Content analysis for live pages ──
+            # Use Readability to extract main content, then clean noise
             body_html = check.get('body') or ''
             try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(body_html, 'html.parser')
-                text = soup.get_text(separator=' ', strip=True)
+                text = _extract_main_content(body_html)
+                text = _clean_content(text)
             except Exception:
-                text = re.sub(r'<[^>]+>', ' ', body_html)
-                text = re.sub(r'\s+', ' ', text).strip()
+                # Fallback: raw text extraction
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(body_html, 'html.parser')
+                    text = soup.get_text(separator=' ', strip=True)
+                except Exception:
+                    text = re.sub(r'<[^>]+>', ' ', body_html)
+                    text = re.sub(r'\s+', ' ', text).strip()
 
             res_out = dict(res)
             res_out['alive'] = True
