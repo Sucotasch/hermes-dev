@@ -2,15 +2,15 @@
 
 ## What this repo is
 
-This is **not** the main Hermes application. It's a deep research pipeline for network search, consisting of a skill (`skills/restore-context/SKILL.md`) and two tools (`ddg_search_tool.py` + `visit_website_enhanced.py`). Files here get restored into `~/.hermes/` via `restore.ps1`. Hermes updates regularly overwrite the live copy — this repo is the durable source of truth.
+This is **not** the main Hermes application. It's a deep research pipeline for network search, plus a standalone CLI variant. Files here get restored into `~/.hermes/` via `restore.ps1`. Hermes updates regularly overwrite the live copy — this repo is the durable source of truth.
 
 ## Critical workflow: edit here, apply there
 
 1. Edit files in this repo
 2. `git add` + `git commit`
-3. Run restore to apply: `powershell.exe -File restore.ps1`
+3. Run restore: `powershell.exe -File restore.ps1`
 4. Dry-run first: add `-DryRun -SkipBackup -NoStopHermes`
-5. Verify after restore: `python -m py_compile` on the three key files under `~/.hermes/`
+5. Verify after restore: `python -m py_compile` on key files under `~/.hermes/`
 
 **Never edit `~/.hermes\` custom files directly without mirroring back to this repo.**
 
@@ -40,12 +40,19 @@ No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone
 
 ## Architecture
 
+### Two execution modes
+
+1. **Hermes plugin mode** — wrapper registers tools with Hermes `tools.registry`. Main entry for interactive use.
+2. **Standalone CLI** — `standalone/deep_research.py` drives the same plugin code directly via `orchestrator.py`, with a local LLM (llama.cpp) for synthesis. Reuses `plugins/web-tools/ddg/` unchanged.
+
 ### Wrapper → Backend pattern
 
 - `hermes-agent/tools/ddg_search_tool.py` — the wrapper. Registers tools with Hermes `tools.registry` via `registry.register(...)` at **module top level** (not inside functions). Uses `spec_from_file_location` to load plugins by absolute path.
 - `plugins/web-tools/ddg/ddg_search.py` — the backend. Search strategies, URL validation, classification, bot-challenge tagging. Policy-free (no topic branching).
 - `plugins/web-tools/ddg/visit_website_enhanced.py` — enhanced fetcher. curl_cffi + httpx fallback + Jina. Handles Cloudflare, age gates, cookie consent.
 - `plugins/web-tools/ddg/query_variants.py` — intent-aware query variant generator. Frequently missing after restore; backend degrades gracefully.
+- `plugins/web-tools/ddg/compose.py` — markdown formatter (compose mode).
+- `standalone/orchestrator.py` — standalone pipeline. Imports `ddg_search` + `visit_website_enhanced` directly, uses `llm_client.py` for synthesis.
 
 ### Registered tools (web toolset)
 
@@ -67,6 +74,7 @@ No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone
 - `browser_dialog_tool.py` is a stub — don't rely on it.
 - `ddg_search.py` was patched in-place. If Hermes overwrites it, verify behavior after each backend update.
 - `restore.ps1` expects PowerShell. On Git Bash / MSYS2: `powershell.exe -File ...`
+- httpx 0.28.1 removed `proxies=` keyword — must use `proxy=` (single URL, not dict).
 - 40-46% of URLs are blocked (HTTP 403). Proxy retry helps ~5%. Further improvement needs headless browser.
 - IMDB, Wikipedia, Reddit blocked by Cloudflare/JS. JS-block detection flags these correctly.
 - `content_relevance_score` is keyword-based; can't disambiguate "Sara James" from "Sara St James" without explicit logic.
@@ -78,15 +86,6 @@ After Level 1 (`web_search_deep`):
 - If `query_type == "visual"` → call `image_search`
 
 Fetcher fallback: `visit_website_tool` first → proxy retry if <500 chars or challenge markers → `web_extract` as last resort.
-
-## Anti-bot features
-
-- **Impersonation rotation**: `IMPERSONATE_POOL = [chrome110, chrome116, chrome120, chrome124]`
-- **DNS circuit breaker**: breaks on `getaddrinfo` error
-- **Proxy retry**: `_check_url_live` retries blocked URLs via proxy
-- **JS-block detection**: catches "JavaScript is disabled", "requires javascript"
-- **Domain blocklist**: 80+ domains (search engines, aggregators, analytics, ads, Russian portals)
-- **Overlay bypass**: ID-based, text-based, button removal (Accept all, I agree)
 
 ## Dependencies
 

@@ -6,7 +6,7 @@ import urllib.error
 
 
 def chat_completion(messages, server_url="http://localhost:8888",
-                    temperature=0.3, max_tokens=2000):
+                    temperature=0.3, max_tokens=2000, model="local"):
     """Send chat completion request to OpenAI-compatible server.
 
     Args:
@@ -14,13 +14,14 @@ def chat_completion(messages, server_url="http://localhost:8888",
         server_url: llama.cpp server base URL
         temperature: creativity (0.0-1.0)
         max_tokens: max response tokens
+        model: model name to use (default: "local" for llama.cpp)
 
     Returns:
         Assistant message content string, or None on error.
     """
     url = f"{server_url}/v1/chat/completions"
     payload = json.dumps({
-        "model": "local",
+        "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -39,7 +40,7 @@ def chat_completion(messages, server_url="http://localhost:8888",
         return None
 
 
-def classify_query_type(query, server_url="http://localhost:8888"):
+def classify_query_type(query, server_url="http://localhost:8888", model="local"):
     """Ask LLM to classify query intent.
 
     Returns one of: person, visual, technical, news, historical, comparison,
@@ -64,7 +65,7 @@ fact, art, education, science, general.
     response = chat_completion([
         {"role": "system", "content": system},
         {"role": "user", "content": query},
-    ], server_url=server_url, temperature=0.0, max_tokens=20)
+    ], server_url=server_url, temperature=0.0, max_tokens=20, model=model)
 
     if response:
         response = response.strip().lower()
@@ -75,7 +76,7 @@ fact, art, education, science, general.
     return "general"
 
 
-def enrich_query(query, query_type, server_url="http://localhost:8888"):
+def enrich_query(query, query_type, server_url="http://localhost:8888", model="local"):
     """Ask LLM to enrich query with aliases, related names, context.
 
     For person queries: adds known aliases/real names/pseudonyms.
@@ -100,7 +101,7 @@ Be specific: only add names you are confident about. Do not fabricate."""
     response = chat_completion([
         {"role": "system", "content": system},
         {"role": "user", "content": f"Enrich this person research query: {query}"},
-    ], server_url=server_url, temperature=0.0, max_tokens=150)
+    ], server_url=server_url, temperature=0.0, max_tokens=150, model=model)
 
     if response and len(response.strip()) > len(query):
         return response.strip()
@@ -108,7 +109,7 @@ Be specific: only add names you are confident about. Do not fabricate."""
 
 
 def synthesize_answer(query, evidence, query_type="general",
-                      server_url="http://localhost:8888"):
+                      server_url="http://localhost:8888", model="local"):
     """Synthesize a final answer from evidence pack.
 
     Args:
@@ -144,6 +145,6 @@ Rules:
     response = chat_completion([
         {"role": "system", "content": system},
         {"role": "user", "content": f"Query: {query}\n\nEvidence:\n{evidence_text}"},
-    ], server_url=server_url, temperature=0.3, max_tokens=3000)
+    ], server_url=server_url, temperature=0.3, max_tokens=3000, model=model)
 
     return response or "_Error: LLM synthesis failed_"

@@ -66,15 +66,15 @@ def _throttle():
 _sessions = {}
 
 def _get_session():
-    """Get or create a curl_cffi Session with rotating Chrome fingerprint."""
+    """Get or create a curl_cffi Session with rotating Chrome fingerprint.
+    Main session always uses direct connection. Proxy is only used for retry."""
     imp = random.choice(IMPERSONATE_POOL)
-    key = (PROXY_URL, imp)
+    key = imp
     if key not in _sessions:
         try:
             import curl_cffi
             sess = curl_cffi.requests.Session(
                 impersonate=imp,
-                proxies={"http": PROXY_URL, "https": PROXY_URL} if USE_PROXY else None,
                 verify=False,
                 timeout=25,
             )
@@ -151,6 +151,24 @@ def _fetch(url, referrer=None, cookies=None):
                     break
                 time.sleep(2)
         
+        # ── Proxy retry for blocked/dead sites ──
+        if USE_PROXY and PROXY_URL:
+            try:
+                import curl_cffi
+                proxy_session = curl_cffi.requests.Session(
+                    impersonate=random.choice(IMPERSONATE_POOL),
+                    proxies={"http": PROXY_URL, "https": PROXY_URL},
+                    verify=False, timeout=25,
+                )
+                extra_headers["User-Agent"] = random.choice(UA_POOL)
+                proxy_resp = proxy_session.get(url, headers=extra_headers, allow_redirects=True)
+                if proxy_resp.status_code < 400 and not _is_blocked(proxy_resp.text):
+                    html = proxy_resp.text
+                    if html and len(html) > 100 and not _is_blocked(html):
+                        return html
+            except Exception:
+                pass
+
         # ── Fallback: httpx ──
         return _fetch_httpx(url, extra_headers)
     
@@ -232,6 +250,19 @@ def _is_blocked(html):
         ('enable javascript and then reload', 'js_required'),
         ('you need to enable javascript', 'js_required'),
         ('requires javascript', 'js_required'),
+        # Russian regional blocks
+        ('данный контент недоступен', 'regional_block'),
+        ('доступ к данной странице ограничен', 'regional_block'),
+        ('эта страница недоступна', 'regional_block'),
+        ('контент заблокирован', 'regional_block'),
+        ('доступ запрещён', 'regional_block'),
+        ('страница не найдена', 'regional_block'),
+        ('доступ закрыт', 'regional_block'),
+        ('доступ к информационному ресурсу ограничен', 'regional_block'),
+        ('информация на данной странице ограничена', 'regional_block'),
+        ('ресурс заблокирован', 'regional_block'),
+        ('доступ временно ограничен', 'regional_block'),
+        ('доступ приостановлен', 'regional_block'),
     ]
     
     for pattern, block_type in blocks:

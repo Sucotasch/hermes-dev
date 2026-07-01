@@ -21,6 +21,7 @@ repo:
   README.md                        <- developer documentation
   RESTORE.md                       <- cheat sheet for manual restore
   restore.ps1                      <- scripted restore (powershell)
+  gui_launcher.bat                 <- double-click GUI launcher
   skills/restore-context/SKILL.md  <- agent-facing restore skill
   skills/web-deep-search/SKILL.md  <- deep research skill (cleaned, 706 lines)
   hermes-agent/tools/
@@ -33,6 +34,12 @@ repo:
     test_query_variants.py         <- unit tests for query_variants
   hermes-agent/
     test_coverage_gate.py          <- unit tests for coverage gate
+  standalone/
+    gui.py                         <- PyQt5 GUI: unified control center
+    orchestrator.py                <- standalone pipeline (reuses plugins/web-tools/ddg/)
+    deep_research.py               <- CLI entry point
+    llm_client.py                  <- llama.cpp/OpenAI-compatible HTTP client
+    logs/                          <- file logs (gitignored)
 ```
 
 ## Verified states and invariants
@@ -284,3 +291,103 @@ standalone/
 
 ### Test reports location
 `reports/` directory contains historical test runs
+
+## Session 2026-07-01 evening: Unified GUI + pipeline improvements
+
+### GUI (standalone/gui.py)
+PyQt5 unified control center with two modes:
+
+**Hermes Mode:**
+- "Check & Restore" button — verifies all 5 web tools loaded via `check_fn`
+- If tools missing → runs `restore.ps1` automatically
+- Status display with color coding (green/red)
+
+**Standalone Mode:**
+- Provider selection: Ollama (11434), LMStudio (1234), Custom (127.0.0.1:8888)
+- Model dropdown — auto-populated from server via `/v1/models` or `/api/tags`
+- "Test" button — pings server, shows connected models
+- Proxy settings: checkbox + URL (default: http://127.0.0.1:2080)
+- Output directory selector with Browse button
+- Validate count spinner (10-500, default 100)
+- Research button with Cancel
+- Progress bar with stage labels
+- File logging toggle — saves to `standalone/logs/research_*.log`
+
+**Launcher:** `gui_launcher.bat` — double-click to start
+
+### Backend changes (plugins/web-tools/ddg/)
+
+**ddg_search.py:**
+- `_detect_blocked()` — added 6 Russian regional block indicators: "данный контент недоступен", "доступ закрыт", "доступ к информационному ресурсу ограничен", etc.
+- `_check_url_live()` — returns `proxy_used` flag in result dict
+- Main session always direct (no proxy); proxy only for retry on blocked/dead URLs
+
+**visit_website_enhanced.py:**
+- `_is_blocked()` — added same 6 Russian regional block indicators
+- `_get_session()` — main session always direct; proxy retry uses separate session
+- `_fetch()` — added proxy retry before httpx fallback
+
+### Pipeline improvements (standalone/orchestrator.py)
+
+**New parameters:**
+- `model` — LLM model name (default: "local"), passed through to llm_client
+- `proxy_enabled` / `proxy_url` — proxy as retry mechanism, not primary transport
+- `log` callback — for GUI progress updates
+
+**Homepage filter:**
+- Filters URLs with empty path, `/`, `home`, `index.html`, `index.htm`
+- Logs filtered homepages separately
+
+**Search URL filter:**
+- Filters URLs containing `search?q=`, `/search/`, etc.
+- Prevents search result pages from entering validation
+
+**Platform-aware dedup:**
+- blogspot, livejournal, medium, wordpress, substack, pikabu, etc.
+- Uses hostname + first path segment instead of base domain
+- Allows multiple blogs on same platform
+
+**Mirror domains:**
+- bunkr.fi, bunkr.ci, bunkr.ax, bunkr.si → treated as one domain
+- Prevents duplicate content from mirror sites
+
+**Query string dedup:**
+- Strips `?m=0`, `?m=1` (mobile/desktop variants) before dedup
+- Preserves other query params (?page=2, ?id=123)
+
+**Domain handling (block vs defer):**
+- 403/captcha after proxy → BLOCK DOMAIN (skip all URLs from domain)
+- 503/timeout after proxy → DEFER (move to end of list, max 10)
+- Gives temporarily unavailable sites a chance to recover
+
+**Keywords check:**
+- Phrase-based matching with word boundaries
+- Extracts first 2-3 significant words from query
+- Checks 3-word, 2-word, then 1-word (4+ chars) phrases
+- Stop words filtered: "free", "image", "gallery", "photo", etc.
+
+**img_bonus for visual queries:**
+- Only if keywords present AND 15+ images (gallery detection)
+- Bonus: `(img_count - 14) * 0.02`, capped at 0.25
+- Prevents irrelevant pages with many images from getting high scores
+
+**GettyImages filter:**
+- Excluded for `query_type=="person"` queries
+- Left for visual queries (acceptable error rate — wrong person rare)
+
+**Deep-read improvements:**
+- `_extract_main_content()` — fixed NoneType bug (`tag.attrs is None` check)
+- Traceback logging in except blocks for debugging
+- Domain dedup uses platform-aware `_dedup_key()`
+
+**Evidence selection:**
+- Visual queries: lower thresholds (text >= 30, relevance >= 0.05)
+- Pages with 3+ images kept even if text sparse
+- img_bonus applied with keywords + gallery check
+
+### Proxy architecture (corrected)
+- Main sessions ALWAYS direct (no proxy)
+- Proxy used ONLY for retry on blocked (403/captcha) or dead (DNS/timeout) URLs
+- `proxy_enabled` controls whether retry-with-proxy is attempted
+- Each retry creates a separate proxy session (not shared with main)
+- NECOBOX at 127.0.0.1:2080 is default when proxy enabled

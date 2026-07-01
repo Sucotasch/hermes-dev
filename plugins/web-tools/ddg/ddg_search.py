@@ -89,20 +89,20 @@ def _throttle():
 _sessions = {}
 
 def _get_session(domain=None):
-    """Get or create a curl_cffi Session with rotating Chrome fingerprint."""
+    """Get or create a curl_cffi Session with rotating Chrome fingerprint.
+    Main session always uses direct connection. Proxy is only used for retry."""
     import curl_cffi
-    
+
     # Rotate impersonation to vary TLS fingerprint across sessions
     imp = random.choice(IMPERSONATE_POOL)
-    # Key by proxy + impersonate
-    key = (PROXY_URL, imp)
+    # Key by impersonate only (no proxy — main session is always direct)
+    key = imp
     if key not in _sessions:
         try:
             sess = curl_cffi.requests.Session(
                  impersonate=imp,
-                 proxies={"http": PROXY_URL, "https": PROXY_URL} if USE_PROXY else None,
                  verify=False,
-                 timeout=8 if USE_PROXY else 15,
+                 timeout=15,
              )
             _sessions[key] = sess
         except Exception as e:
@@ -255,6 +255,13 @@ def _detect_blocked(html):
         'turn on javascript', 'enable cookies',
         'javascript is disabled', 'enable javascript and then reload',
         'you need to enable javascript', 'requires javascript',
+        # Russian regional blocks
+        'данный контент недоступен', 'доступ к данной странице ограничен',
+        'эта страница недоступна', 'контент заблокирован',
+        'доступ запрещён', 'страница не найдена',
+        'доступ закрыт', 'доступ к информационному ресурсу ограничен',
+        'информация на данной странице ограничена', 'ресурс заблокирован',
+        'доступ временно ограничен', 'доступ приостановлен',
     ]
     # Check for actual captcha forms (not just config mentions)
     if 'captcha' in html_lower:
@@ -1397,6 +1404,7 @@ def _check_url_live(url, timeout=10):
          "text_length": 0,
          "text_words": 0,
          "blocked": False,
+         "proxy_used": False,
          "error": None,
          "body": None,
      }
@@ -1473,19 +1481,18 @@ def _check_url_live(url, timeout=10):
              # Retry with proxy if available
              if USE_PROXY and PROXY_URL:
                  try:
-                     proxy_session = _get_session.__wrapped__() if hasattr(_get_session, '__wrapped__') else None
-                     if not proxy_session:
-                         import curl_cffi
-                         proxy_session = curl_cffi.requests.Session(
-                             impersonate=random.choice(IMPERSONATE_POOL),
-                             proxies={"http": PROXY_URL, "https": PROXY_URL},
-                             verify=False, timeout=timeout,
-                         )
+                     import curl_cffi
+                     proxy_session = curl_cffi.requests.Session(
+                         impersonate=random.choice(IMPERSONATE_POOL),
+                         proxies={"http": PROXY_URL, "https": PROXY_URL},
+                         verify=False, timeout=timeout,
+                     )
                      proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
                      if proxy_resp.status_code < 400 and not _detect_blocked(proxy_resp.text):
                          raw = proxy_resp.text
                          result["blocked"] = False
                          result["error"] = None
+                         result["proxy_used"] = True
                  except Exception:
                      pass
              if result.get("blocked") or _detect_blocked(raw):
@@ -1511,15 +1518,14 @@ def _check_url_live(url, timeout=10):
         return result
 
     # Proxy retry for dead sites (DNS/timeout errors only, not JS/captcha)
-    if not result["alive"] and not result.get("blocked"):
+    if not result["alive"] and not result.get("blocked") and USE_PROXY and PROXY_URL:
         error = result.get("error", "")
         if any(k in error.lower() for k in ["getaddrinfo", "timeout", "failed to resolve", "name or service"]):
             try:
                 import curl_cffi
-                proxy_url = "http://127.0.0.1:2080"
                 proxy_session = curl_cffi.requests.Session(
                     impersonate=random.choice(IMPERSONATE_POOL),
-                    proxies={"http": proxy_url, "https": proxy_url},
+                    proxies={"http": PROXY_URL, "https": PROXY_URL},
                     verify=False, timeout=timeout,
                 )
                 proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
@@ -1535,6 +1541,7 @@ def _check_url_live(url, timeout=10):
                         if result["text_length"] >= 500 and result["text_words"] >= 50:
                             result["alive"] = True
                             result["error"] = None
+                            result["proxy_used"] = True
                             return result
             except Exception:
                 pass
