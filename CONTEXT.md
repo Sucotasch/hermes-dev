@@ -391,3 +391,37 @@ PyQt5 unified control center with two modes:
 - `proxy_enabled` controls whether retry-with-proxy is attempted
 - Each retry creates a separate proxy session (not shared with main)
 - NECOBOX at 127.0.0.1:2080 is default when proxy enabled
+- **Persistent proxy**: GUI saves to `~/.hermes/proxy.env`, backend reads on startup
+
+## Standalone vs Hermes: feature parity gap
+
+### What's shared (backend ddg_search.py)
+- Phrase-based scoring in `content_relevance_score()` ✓
+- Homepage/search URL filter in `search_deep()` ✓
+- Regional block detection (Russian) ✓
+- Proxy retry mechanism ✓
+- `proxy_used` flag in `_check_url_live()` result ✓
+- Proxy file persistence (`~/.hermes/proxy.env`) ✓
+
+### What's ONLY in standalone orchestrator (NOT in Hermes mode)
+These features improve quality but are missing from `search_deep()` backend:
+
+| Feature | Impact on Hermes | Effort to add |
+|---------|------------------|---------------|
+| Domain quarantine (block/defer) | Skip blocked domains faster | Medium |
+| Platform-aware dedup | Allow multiple blogspot/livejournal blogs | Low |
+| Mirror domains (bunkr.fi/ci/ax) | Prevent duplicate mirror content | Low |
+| Query string dedup (?m=0, ?m=1) | Prevent mobile/desktop duplicates | Low |
+| Keywords check | Better relevance filtering | Medium |
+| img_bonus for visual queries | Gallery detection for visual searches | Medium |
+| GettyImages filter for person queries | Avoid wrong person results | Low |
+| `_extract_main_content()` NoneType fix | Prevent crashes on malformed HTML | Low |
+| Evidence selection improvements | Better evidence quality | Medium |
+
+### What's ONLY in Hermes wrapper (NOT in standalone)
+- `_apply_post_retrieval_filter()` — Jaccard-based dedup + source quotas
+- `_compact_evidence()` — compress for small context windows
+- `_is_coverage_sufficient()` — check if enough diverse sources
+
+### Recommendation
+Add platform-aware dedup, mirror domains, and query string dedup to `search_deep()` backend. These are low-effort, high-impact improvements that benefit both modes.
