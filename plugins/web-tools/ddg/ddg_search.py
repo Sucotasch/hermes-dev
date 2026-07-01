@@ -32,11 +32,25 @@ except Exception:
 # Proxy detection order:
 #   1) DDG_PROXY env var (explicit DDG selection)
 #   2) HTTPS_PROXY / HTTP_PROXY env vars (system-wide)
+#   3) ~/.hermes/proxy.env file (persistent settings from GUI)
 # None — direct connection. No proxy is assumed when none of the above is set.
+def _load_proxy_from_file():
+    """Read proxy URL from ~/.hermes/proxy.env if exists."""
+    try:
+        proxy_file = Path.home() / ".hermes" / "proxy.env"
+        if proxy_file.exists():
+            content = proxy_file.read_text().strip()
+            if content and not content.startswith("#"):
+                return content
+    except Exception:
+        pass
+    return None
+
 _CONFIGURED_PROXY = (
     os.environ.get("DDG_PROXY")
     or os.environ.get("HTTPS_PROXY")
     or os.environ.get("HTTP_PROXY")
+    or _load_proxy_from_file()
 )
 USE_PROXY = bool(_CONFIGURED_PROXY)
 PROXY_URL = _CONFIGURED_PROXY

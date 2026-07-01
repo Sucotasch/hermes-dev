@@ -417,12 +417,14 @@ class HermesGUI(QMainWindow):
         row_proxy = QHBoxLayout()
         self.chk_proxy = QCheckBox("Proxy")
         self.chk_proxy.setChecked(True)
+        self.chk_proxy.toggled.connect(self._on_proxy_changed)
         row_proxy.addWidget(self.chk_proxy)
 
         row_proxy.addWidget(QLabel("URL:"))
         self.txt_proxy = QLineEdit("http://127.0.0.1:2080")
         self.txt_proxy.setPlaceholderText("http://host:port")
         self.txt_proxy.setMaximumWidth(220)
+        self.txt_proxy.editingFinished.connect(self._on_proxy_changed)
         row_proxy.addWidget(self.txt_proxy)
 
         row_proxy.addStretch()
@@ -520,6 +522,24 @@ class HermesGUI(QMainWindow):
         self.lbl_conn_status.setStyleSheet("")
         self.cmb_model.clear()
         self.cmb_model.addItem("local")
+
+    def _on_proxy_changed(self):
+        """Save proxy settings to ~/.hermes/proxy.env for Hermes mode."""
+        from pathlib import Path
+        proxy_dir = Path.home() / ".hermes"
+        proxy_file = proxy_dir / "proxy.env"
+        try:
+            if self.chk_proxy.isChecked():
+                url = self.txt_proxy.text().strip()
+                if url:
+                    proxy_dir.mkdir(parents=True, exist_ok=True)
+                    proxy_file.write_text(url)
+                else:
+                    proxy_file.unlink(missing_ok=True)
+            else:
+                proxy_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def _on_test_connection(self):
         url = self.txt_server.text().strip()
