@@ -1743,42 +1743,85 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     raw_count = len(all_raw)
 
     # Step 2: URL validation (parallel via ThreadPoolExecutor)
+    # Domain quarantine: 403/captcha after 2 failures → skip remaining URLs from domain
     validated = []
     alive_count = 0
     dead_count = 0
     blocked_count = 0
+    quarantined_count = 0
+    domain_fails = {}   # {domain: fail_count}
+    quarantined = set() # domains with 2+ blocked failures
+
+    def _base_domain(hostname):
+        if not hostname:
+            return ""
+        parts = hostname.split(".")
+        return ".".join(parts[-2:]) if len(parts) > 2 else hostname
+
+    # Pre-scan: separate normal and quarantined URLs
     results_slice = all_raw[:max_validate]
-    
-    # Process URLs in parallel batches of 5 to avoid overwhelming proxy
+    normal_urls = []
+    quarantined_urls = []
+    for r in results_slice:
+        url = r.get("url", "")
+        try:
+            host = urllib.parse.urlparse(url).hostname or ""
+            dom = _base_domain(host.lower())
+        except Exception:
+            dom = ""
+        if dom in quarantined:
+            quarantined_urls.append(r)
+        else:
+            normal_urls.append(r)
+
+    # Limit quarantined URLs to avoid wasting time
+    MAX_DEFERRED = 10
+    quarantined_urls = quarantined_urls[:MAX_DEFERRED]
+
+    # Process: normal first, quarantined at the end
+    ordered_urls = normal_urls + quarantined_urls
+    batch_size = 10
+
     def _validate_one(item):
         """Validate a single URL — called in thread pool."""
-        i, res = item
-        url = res.get("url", "")
-        title = res.get("title", "")
+        url = item.get("url", "")
         check = _check_url_live(url, timeout=timeout_per_url)
-        return i, res, check
-    
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(_validate_one, (i, r)) for i, r in enumerate(results_slice)]
-        for future in futures:
-            i, res, check = future.result()
-            url = res.get('url', '')
-            title = res.get('title', '')
+        return item, check
 
-            if not check['alive']:
-                dead_count += 1
-                if check.get('blocked'):
-                    blocked_count += 1
-                res_out = dict(res)
-                res_out['alive'] = False
-                res_out['status'] = check['status']
-                res_out['error'] = check.get('error', 'unknown')
-                res_out['content_length'] = check.get('content_length', 0)
-                res_out['text_words'] = check.get('text_words', 0)
-                validated.append(res_out)
-                continue
+    for batch_start in range(0, len(ordered_urls), batch_size):
+        batch = ordered_urls[batch_start:batch_start + batch_size]
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(_validate_one, item) for item in batch]
+            for future in futures:
+                res, check = future.result()
+                url = res.get('url', '')
 
-            alive_count += 1
+                try:
+                    host = urllib.parse.urlparse(url).hostname or ""
+                    dom = _base_domain(host.lower())
+                except Exception:
+                    dom = ""
+
+                if not check['alive']:
+                    dead_count += 1
+                    # Track domain failures for quarantine (only 403/captcha)
+                    if check.get('blocked') or (check.get('status') and check['status'] in (403, 429, 451)):
+                        domain_fails[dom] = domain_fails.get(dom, 0) + 1
+                        if domain_fails[dom] >= 2 and dom not in quarantined:
+                            quarantined.add(dom)
+                            quarantined_count += 1
+                    if check.get('blocked'):
+                        blocked_count += 1
+                    res_out = dict(res)
+                    res_out['alive'] = False
+                    res_out['status'] = check['status']
+                    res_out['error'] = check.get('error', 'unknown')
+                    res_out['content_length'] = check.get('content_length', 0)
+                    res_out['text_words'] = check.get('text_words', 0)
+                    validated.append(res_out)
+                    continue
+
+                alive_count += 1
 
             # ── Step 3: Content analysis for live pages ──
             body_html = check.get('body') or ''
@@ -1843,6 +1886,7 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
             "alive": alive_count,
             "dead": dead_count,
             "blocked": blocked_count,
+            "quarantined_domains": quarantined_count,
             "classified_categories": len(categories) if classify else 0,
             "max_validate": max_validate,
             "elapsed_seconds": elapsed,
