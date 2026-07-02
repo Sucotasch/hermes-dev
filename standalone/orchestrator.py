@@ -639,15 +639,19 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 log(f"    {j}. {u[:90]}")
     timings["search"] = round(time.time() - t, 1)
 
-    # Step 3: Blocklist + homepage + search URL filter
+    # Step 3: Blocklist + homepage + search URL + video filter
     from urllib.parse import urlparse
     before = len(all_results)
     blocked_urls = []
     homepage_urls = []
     search_urls = []
+    video_urls = []
     kept_results = []
     _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
     _SEARCH_PATTERNS = ("/search", "/images/search", "search?q=", "search?s=", "/search/")
+    _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "rutube", "yandex.ru/video",
+                      "dzen.ru/video", "vimeo.com", "tiktok.com")
+    _VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
     for r in all_results:
         url = r.get("url", "")
         if ddg_search.is_blocked_domain(url):
@@ -659,17 +663,23 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 homepage_urls.append(url)
             elif any(p in url_lower for p in _SEARCH_PATTERNS):
                 search_urls.append(url)
+            elif query_type != "video" and (
+                any(d in url_lower for d in _VIDEO_DOMAINS) or
+                any(p in url_lower for p in _VIDEO_PATH_PATTERNS)):
+                video_urls.append(url)
             else:
                 kept_results.append(r)
     all_results = kept_results
     if log:
-        log(f"  After blocklist: {len(all_results)} kept, {len(blocked_urls)} blocked, {len(homepage_urls)} homepages, {len(search_urls)} search-URLs")
+        log(f"  After blocklist: {len(all_results)} kept, {len(blocked_urls)} blocked, {len(homepage_urls)} homepages, {len(search_urls)} search-URLs, {len(video_urls)} video")
         for u in blocked_urls:
             log(f"    BLOCKED: {u[:90]}")
         for u in homepage_urls:
             log(f"    HOMEPAGE: {u[:90]}")
         for u in search_urls:
             log(f"    SEARCH-URL: {u[:90]}")
+        for u in video_urls:
+            log(f"    VIDEO: {u[:90]}")
 
     # Step 3b: Filter GettyImages for person queries (wrong person risk)
     if query_type == "person":
@@ -701,6 +711,11 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 for link in page.get("links", []):
                     href = link.get("url", "")
                     if href and href not in seen_urls and not ddg_search.is_blocked_domain(href):
+                        href_lower = href.lower()
+                        if query_type != "video" and (
+                            any(d in href_lower for d in _VIDEO_DOMAINS) or
+                            any(p in href_lower for p in _VIDEO_PATH_PATTERNS)):
+                            continue
                         seen_urls.add(href)
                         level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
             except Exception:

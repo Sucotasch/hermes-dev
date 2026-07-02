@@ -1371,11 +1371,6 @@ def extract_fullsize_images(html, base_url=""):
 
 # ── Deep Search: validation, classification, image preview ──────────────────
 
-_HOST_BLOCKLIST = {
-    "2ch.org", "pikabu.ru", "championat.com", "fon.bet",
-    "softmixer.com", "mosvodokanal.ru", "nordstar.ru", "sky8.ru",
-    "zen.yandex.ru", "youtube.com", "ru.wikipedia.org",
-}
 # Category keywords — mapped from content signals, not URL only
 _CATEGORY_KEYWORDS = {
     "gallery": ["gallery", "picture", "photo", "image", "pic", "album", "set", "collection", "imgur", "flickr", "skin", "preview", "screenshot", "assets", "pack"],
@@ -1836,7 +1831,7 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
     _SEARCH_PATTERNS = ("/search", "search?q=", "search?s=", "/images/search")
     # Video domains: block ALL URLs from these domains (playlists, channels, redirects)
-    _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "yandex.ru/video", "dzen.ru/video",
+    _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "rutube", "yandex.ru/video", "dzen.ru/video",
                       "vimeo.com", "tiktok.com")
     # Video path patterns: block specific paths
     _VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
