@@ -121,14 +121,15 @@ PyQt5 unified control center with two modes:
 ### Search Pipeline
 1. **Multi-query collection**: 4-6 query variants → 50-150 raw URLs per query
 2. **Homepage + search URL filter**: removes homepages and search result pages
-3. **Blocklist filter**: removes analytics, ads, search engines, aggregators
-4. **URL validation**: HEAD-first (dead/blocked early), then GET for alive pages
-5. **Domain quarantine**: 403/captcha → skip domain; 503/timeout → defer to end
-6. **Content relevance scoring**: phrase-based keywords + word-overlap scoring
-7. **Level 2 expansion**: if relevant_alive < 15, expand from top alive pages
-8. **Deep-read**: platform-aware dedup, mirror domain handling
-9. **Evidence selection**: phrase keywords + gallery detection for visual queries
-10. **Synthesis**: LLM builds answer from evidence pack with inline citations
+3. **Video URL filter**: blocks youtube, rutube, tiktok, vimeo for non-video queries
+4. **Blocklist filter**: removes analytics, ads, search engines, aggregators
+5. **URL validation**: HEAD-first (dead/blocked early), then GET for alive pages
+6. **Domain quarantine**: 403/captcha → skip domain; 503/timeout → defer to end
+7. **Content relevance scoring**: phrase-based keywords + word-overlap scoring
+8. **Level 2 expansion**: if relevant_alive < 15, expand from top alive pages
+9. **Deep-read**: platform-aware dedup, mirror domain handling
+10. **Evidence selection**: phrase keywords + gallery detection for visual queries
+11. **Synthesis**: LLM builds answer from evidence pack with inline citations
 
 ### Anti-Bot
 - **curl_cffi impersonation**: rotates Chrome 110-124 TLS fingerprints

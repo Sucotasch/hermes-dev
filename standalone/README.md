@@ -45,9 +45,12 @@ llm_client.py       llama.cpp HTTP client
 
 1. LLM classifies query intent (visual/technical/news/etc.)
 2. Multi-query search collects URLs
-3. Blocklist filters junk domains
-4. URL validation (HEAD-first, then GET)
-5. Content relevance scoring
-6. Evidence pack compacted for LLM context
-7. LLM synthesizes final answer
-8. Report saved as .md file
+3. Homepage + search URL + video URL filter
+4. Blocklist filters junk domains
+5. URL validation (HEAD-first, then GET)
+6. Domain quarantine (403 → skip, 503 → defer)
+7. Content relevance scoring
+8. Level 2 expansion (if alive < 15)
+9. Deep-read with platform-aware dedup
+10. Evidence selection + LLM synthesis
+11. Report saved as .md file

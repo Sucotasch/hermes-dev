@@ -292,6 +292,28 @@ standalone/
 ### Test reports location
 `reports/` directory contains historical test runs
 
+## Session 2026-07-02: Video filter + pipeline quality fixes
+
+### Video URL filter (standalone orchestrator)
+- **Step 3 filter**: blocks youtube.com, rutube.ru, rutube, yandex.ru/video, dzen.ru/video, vimeo.com, tiktok.com + path patterns (watch?, .mp4, .avi, .mov)
+- **Level 2 expansion**: skips video links discovered from page HTML
+- **query_type guard**: filter disabled when `query_type == "video"` (user explicitly searches for video sources)
+- **Wrapper domain fix**: added `"rutube"` (without `.ru`) to catch `voov.kz/rutube-...` wrappers
+- **Dead code cleanup**: removed unused `_HOST_BLOCKLIST` from ddg_search.py
+
+### What was NOT changed (accepted tradeoffs)
+- Evidence selection scoring uses DDG snippet (not deep-text) — keyword-based scoring can't distinguish context
+- `/music/`, `/tag/`, `/category/` URL filters too aggressive — would block legitimate content
+- viplist.space (music download site) stays in evidence — domain-specific blocking not worth the cost
+- rtings.com rel=0.00 in deep-read — Readability can't extract from JS-heavy pages, DDG snippet scoring works
+
+### Empirical results (log 2026-07-02_154254)
+- 12 video URLs filtered in Step 3 (0 in evidence)
+- 110 kept, 9 blocked, 18 homepages, 0 search-URLs, 12 video
+- Validation: 48 alive, 25 dead, 27 blocked, 7 domain-blocked
+- Deep-read: 19 pages read, 80 images (288s)
+- Total: 423.7s
+
 ## Session 2026-07-01 evening: Unified GUI + pipeline improvements
 
 ### GUI (standalone/gui.py)
