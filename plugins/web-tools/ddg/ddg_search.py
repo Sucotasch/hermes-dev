@@ -1832,9 +1832,13 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     # Filter blocked domains before validation (saves N network requests)
     all_raw = [item for item in all_raw if not is_blocked_domain(item.get("url", ""), query_type)]
 
-    # Filter homepages and search result pages (saves validation time)
+    # Filter homepages, search results, and video URLs (saves validation time)
     _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
     _SEARCH_PATTERNS = ("/search", "search?q=", "search?s=", "/images/search")
+    _VIDEO_URL_PATTERNS = ("watch?", "view_video.php", "youtube.com/watch",
+                           "vimeo.com/", "tiktok.com/", "rutube.ru/video/",
+                           "yandex.ru/video/", "dzen.ru/video/",
+                           "video_", ".mp4", ".avi", ".mov")
     _filtered_out = []
     _kept = []
     for item in all_raw:
@@ -1843,7 +1847,11 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
             parsed = urllib.parse.urlparse(url)
             path = parsed.path.strip("/").lower()
             url_lower = url.lower()
+            # Homepage / search filter
             if path in _HOMEPAGE_PATHS or any(p in url_lower for p in _SEARCH_PATTERNS):
+                _filtered_out.append(url)
+            # Video filter — skip for non-video queries
+            elif query_type != "video" and any(p in url_lower for p in _VIDEO_URL_PATTERNS):
                 _filtered_out.append(url)
             else:
                 _kept.append(item)
@@ -1865,11 +1873,7 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
         except Exception as exc:
             print(f"[ddg-search] dynamic query generation failed: {exc}", file=sys.stderr)
 
-    # Video URL filter — AFTER dynamic variants to catch all video URLs
-    _VIDEO_URL_PATTERNS = ("watch?", "view_video.php", "youtube.com/watch",
-                           "vimeo.com/", "tiktok.com/", "rutube.ru/video/",
-                           "yandex.ru/video/", "dzen.ru/video/",
-                           "video_", ".mp4", ".avi", ".mov")
+    # Video filter AGAIN after dynamic variants (catches any new video URLs)
     if query_type != "video":
         _video_filtered = []
         _video_kept = []
