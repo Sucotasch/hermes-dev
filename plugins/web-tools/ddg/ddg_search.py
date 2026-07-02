@@ -1832,9 +1832,11 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     # Filter blocked domains before validation (saves N network requests)
     all_raw = [item for item in all_raw if not is_blocked_domain(item.get("url", ""), query_type)]
 
-    # Filter homepages and search result pages (saves validation time)
+    # Filter homepages, search result pages, and video URLs (saves validation time)
     _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
     _SEARCH_PATTERNS = ("/search", "search?q=", "search?s=", "/images/search")
+    _VIDEO_URL_PATTERNS = ("watch?", "view_video.php", "youtube.com/watch",
+                           "vimeo.com/", "tiktok.com/", ".mp4", ".avi", ".mov")
     _filtered_out = []
     _kept = []
     for item in all_raw:
@@ -1843,7 +1845,11 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
             parsed = urllib.parse.urlparse(url)
             path = parsed.path.strip("/").lower()
             url_lower = url.lower()
+            # Video filter — skip for video queries (they need video URLs)
+            is_video_url = any(p in url_lower for p in _VIDEO_URL_PATTERNS)
             if path in _HOMEPAGE_PATHS or any(p in url_lower for p in _SEARCH_PATTERNS):
+                _filtered_out.append(url)
+            elif is_video_url and query_type != "video":
                 _filtered_out.append(url)
             else:
                 _kept.append(item)
