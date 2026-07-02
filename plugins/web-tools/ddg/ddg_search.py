@@ -1835,10 +1835,11 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     # Filter homepages, search results, and video URLs (saves validation time)
     _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
     _SEARCH_PATTERNS = ("/search", "search?q=", "search?s=", "/images/search")
-    _VIDEO_URL_PATTERNS = ("watch?", "view_video.php", "youtube.com/watch",
-                           "vimeo.com/", "tiktok.com/", "rutube.ru/video/",
-                           "yandex.ru/video/", "dzen.ru/video/",
-                           "video_", ".mp4", ".avi", ".mov")
+    # Video domains: block ALL URLs from these domains (playlists, channels, redirects)
+    _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "yandex.ru/video", "dzen.ru/video",
+                      "vimeo.com", "tiktok.com")
+    # Video path patterns: block specific paths
+    _VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
     _filtered_out = []
     _kept = []
     for item in all_raw:
@@ -1850,8 +1851,10 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
             # Homepage / search filter
             if path in _HOMEPAGE_PATHS or any(p in url_lower for p in _SEARCH_PATTERNS):
                 _filtered_out.append(url)
-            # Video filter — skip for non-video queries
-            elif query_type != "video" and any(p in url_lower for p in _VIDEO_URL_PATTERNS):
+            # Video filter — block entire domains + path patterns for non-video queries
+            elif query_type != "video" and (
+                any(d in url_lower for d in _VIDEO_DOMAINS) or
+                any(p in url_lower for p in _VIDEO_PATH_PATTERNS)):
                 _filtered_out.append(url)
             else:
                 _kept.append(item)
@@ -1879,7 +1882,8 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
         _video_kept = []
         for item in all_raw:
             url_lower = item.get("url", "").lower()
-            if any(p in url_lower for p in _VIDEO_URL_PATTERNS):
+            if (any(d in url_lower for d in _VIDEO_DOMAINS) or
+                any(p in url_lower for p in _VIDEO_PATH_PATTERNS)):
                 _video_filtered.append(item.get("url", ""))
             else:
                 _video_kept.append(item)
