@@ -152,8 +152,6 @@ PyQt5 unified control center with two modes:
 - `content_relevance_score` can match partial words — phrase check mitigates but not perfect
 - `image_search` returns page URLs, not always direct .jpg links
 - No headless browser — JS-heavy SPA content is missed
-- GettyImages may return wrong person for visual queries (acceptable error rate)
-- vintage-erotica-forum.com often returns 503 — deferred to end of validation
 
 ## Development Rules
 
