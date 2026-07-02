@@ -1867,7 +1867,9 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
 
     # Video URL filter — AFTER dynamic variants to catch all video URLs
     _VIDEO_URL_PATTERNS = ("watch?", "view_video.php", "youtube.com/watch",
-                           "vimeo.com/", "tiktok.com/", ".mp4", ".avi", ".mov")
+                           "vimeo.com/", "tiktok.com/", "rutube.ru/video/",
+                           "yandex.ru/video/", "dzen.ru/video/",
+                           "video_", ".mp4", ".avi", ".mov")
     if query_type != "video":
         _video_filtered = []
         _video_kept = []
