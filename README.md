@@ -1,149 +1,163 @@
 # Hermes Deep Research Pipeline
 
-Deep research tools for Hermes Agent — network search, URL validation, image extraction, anti-bot bypass. Unified GUI with standalone CLI and Hermes plugin modes.
+**Hermes Deep Research** is a robust, dual-mode deep web research pipeline designed originally for the Hermes Agent. It operates with zero external search API dependencies (no SerpApi, SearchAPI, or Felo keys required), enabling multi-engine evidence collection, comprehensive URL validation, image extraction, and anti-bot bypassing. 
 
-## Architecture
+The pipeline can be used as a seamlessly integrated plugin for the Hermes Agent or as a fully independent standalone application (CLI & GUI) powered by local LLMs like `llama.cpp`, `vLLM`, `Ollama`, or `LMStudio`.
 
-```
-User query
-  → LLM assigns query_type (visual/technical/news/historical/comparison/general)
-  → web_search_deep (multi-query, validate, dedup)
-  → web_expand_and_fetch (Level 2 expansion if alive < 15)
-  → image_search (if query_type == "visual")
-  → LLM synthesizes answer from evidence pack
-```
+---
 
-### Two execution modes
+## 🚀 Real Capabilities
 
-1. **Hermes plugin mode** — wrapper registers tools with Hermes `tools.registry`. Main entry for interactive use.
-2. **Standalone CLI/GUI** — `standalone/deep_research.py` or `standalone/gui.py` drives the same plugin code directly via `orchestrator.py`, with a local LLM (llama.cpp, Ollama, LMStudio) for synthesis.
+- **Zero-Dependency Multi-Engine Search**: Gathers broad data pools across multiple search engines (DuckDuckGo, Yahoo, Yandex, Mojeek) without requiring paid API keys.
+- **Intent-Aware Query Variants**: Automatically decomposes queries into "Core + Constraint + Variants" (e.g., extracting symptoms, error codes, official manuals, or community threads) to maximize search coverage.
+- **Intelligent Two-Level Fetching**: 
+  - *Level 1*: Wide search pool collection, HEAD-first URL validation, liveness checks, and relevance scoring.
+  - *Level 2*: Autonomous expansion (`web_expand_and_fetch`) that visits live pages from Level 1, extracts hyperlinks, and dives deeper if initial coverage is insufficient (e.g., alive URLs < 15).
+- **Anti-Bot & Access Bypass**: Employs `curl_cffi`, `httpx` fallbacks, and Jina to navigate past Cloudflare protections, age gates, and cookie consent overlays.
+- **Auto-Triggered Visual Context**: Mandates and automatically executes `image_search` for queries classified under visual culture, arts, or people.
+- **Agent-Side Synthesis**: Supports raw JSON outputs allowing the overarching Agent (or a local LLM via CLI) to synthesize the evidence pack into heavily cited Markdown reports.
 
-### Files
+---
 
-| File | Role |
-|------|------|
-| `hermes-agent/tools/ddg_search_tool.py` | Wrapper: tool registration, query_type routing |
-| `plugins/web-tools/ddg/ddg_search.py` | Backend: search strategies, validation, blocklist, images |
-| `plugins/web-tools/ddg/visit_website_enhanced.py` | Fetcher: curl_cffi, httpx, Jina, overlay stripping |
-| `plugins/web-tools/ddg/query_variants.py` | Intent-aware query variant generator |
-| `plugins/web-tools/ddg/compose.py` | Markdown formatter (compose mode) |
-| `standalone/gui.py` | PyQt5 GUI: unified control center |
-| `standalone/orchestrator.py` | Standalone pipeline (reuses plugins/web-tools/ddg/) |
-| `standalone/deep_research.py` | CLI entry point |
-| `standalone/llm_client.py` | LLM client (OpenAI-compatible API) |
-| `skills/web-deep-search/SKILL.md` | Deep research skill documentation |
+## 🧠 Architecture & Algorithm of Operation
 
-## Setup
+### Execution Modes
+The pipeline features a unified backend (`plugins/web-tools/ddg/`) driven by two distinct modes:
+1. **Hermes Plugin Mode**: Wrappers register tools directly into the Hermes Agent's `tools.registry`. The main entry point is `hermes-agent/tools/ddg_search_tool.py`.
+2. **Standalone Mode (CLI/GUI)**: Completely bypasses the Hermes framework. Uses `standalone/orchestrator.py` to drive the backend scripts directly, relying on `standalone/llm_client.py` to interface with any OpenAI-compatible local API server for synthesis.
 
-### Requirements
-- Python 3.11+ (any machine)
-- Hermes Agent installed (`~/.hermes/` exists)
-- PowerShell (for restore.ps1) or manual file copy
-- PyQt5 (for GUI mode)
+### The Algorithm: Deep Research Workflow
 
-### Install dependencies
+When a query is ingested, the system follows a strict, multi-pass workflow:
+1. **Intent Classification**: The LLM evaluates the user query and assigns a `query_type` (visual, technical, news, historical, comparison, general).
+2. **Dynamic Variant Generation**: Token heuristics create multiple context-rich query formulations.
+3. **Level 1 Collection & Filtering (Search & Validate)**:
+   - Queries are dispatched across engines.
+   - Results pass through domain blocklists (filtering junk/SEO spam).
+   - Validated via HEAD-first requests, then GET.
+   - Domains returning `403` are skipped; `503` are deferred/quarantined.
+4. **Relevance Scoring**: Discovered URLs are ranked based on token overlap with the initial query.
+5. **Level 2 Expansion (Coverage Gate)**: If the pool yields fewer than 15 alive sources (or if visual/people facets demand more context), `web_expand_and_fetch` scrapes Level 1 pages for secondary hyperlinks to ingest.
+6. **Deep Reading & Deduplication**: Platform-aware page scraping runs via `visit_website_enhanced` using anti-bot mechanisms. Content is deduplicated.
+7. **Synthesis**: The LLM synthesizes a cohesive, narrative report from the JSON evidence pack, optionally formatted by `compose.py` if running in compose mode.
+
+### Core Files & Responsibilities
+
+| Component Path | Architectural Role |
+| --- | --- |
+| `hermes-agent/tools/ddg_search_tool.py` | Hermes-specific wrapper. Registers tools and normalizes parameters without enforcing policy. |
+| `plugins/web-tools/ddg/ddg_search.py` | Search backend. Handles queries, multi-engine routing, HEAD-validation, and blocklists. |
+| `plugins/web-tools/ddg/visit_website_enhanced.py` | Smart fetcher. Reads pages using `curl_cffi` / `httpx`, stripping bot-checks and overlays. |
+| `plugins/web-tools/ddg/query_variants.py` | Intent-aware reformulator. Generates diverse queries to maximize search surface. |
+| `standalone/orchestrator.py` | Pipeline manager for the standalone version, bypassing Hermes logic. |
+| `standalone/llm_client.py` | HTTP client for interfacing with local OpenAI-compatible endpoints (Ollama, llama.cpp). |
+
+---
+
+## ⚙️ Installation and Configuration
+
+### Prerequisites
+- Python 3.11 or higher.
+- *(For Plugin Mode)*: Hermes Agent installed (directory `~/.hermes/` exists).
+- *(For Standalone Mode)*: A running LLM server (llama.cpp, Ollama, LMStudio, vLLM).
+- PowerShell (Windows) for auto-deployment, or basic shell for macOS/Linux.
+
+### 1. Install Dependencies
 ```bash
 pip install httpx curl_cffi ddgs beautifulsoup4 lxml PyQt5
 ```
 
-### Deploy to Hermes
+### 2. Setup Mode Selection
+
+#### Option A: Standalone Use (No Hermes required)
+Simply clone the repository and run from the directory. No further file-moving is required.
 ```bash
-# Clone repo anywhere
-git clone <repo-url> hermes-dev
+git clone https://github.com/Sucotasch/hermes-dev.git
 cd hermes-dev
-
-# Auto-restore (detects repo location and ~/.hermes/ automatically)
-powershell.exe -File restore.ps1
-
-# Dry-run first (safe, no changes)
-powershell.exe -File restore.ps1 -DryRun -SkipBackup -NoStopHermes
 ```
 
-On Linux/macOS (no PowerShell): copy files manually:
+#### Option B: Deploying to Hermes Agent
+You need to inject these tools into the Hermes Agent's local directory.
+
+**On Windows:**
+```powershell
+# Dry-run to verify paths (Safe, no changes)
+powershell.exe -File restore.ps1 -DryRun -SkipBackup -NoStopHermes
+
+# Actual execution
+powershell.exe -File restore.ps1
+```
+
+**On Linux/macOS (Manual Copy):**
 ```bash
 cp hermes-agent/tools/ddg_search_tool.py ~/.hermes/hermes-agent/tools/
 cp plugins/web-tools/ddg/*.py ~/.hermes/plugins/web-tools/ddg/
 cp skills/web-deep-search/SKILL.md ~/.hermes/skills/web-deep-search/
-cp CONTEXT.md ~/.hermes/
 ```
 
-### Verify after deploy
+Verify successful installation for the plugin:
 ```bash
 python -m py_compile ~/.hermes/plugins/web-tools/ddg/ddg_search.py
-python -m py_compile ~/.hermes/plugins/web-tools/ddg/visit_website_enhanced.py
 python -m py_compile ~/.hermes/hermes-agent/tools/ddg_search_tool.py
 ```
 
-## Key Commands
+---
+
+## 💻 Examples of Using Main Functions
+
+### 1. Standalone CLI Usage
+The `deep_research.py` script executes the full Level-1 + Level-2 pipeline and dumps the synthesized output to a Markdown file.
 
 ```bash
-# Launch GUI
-python standalone/gui.py
-# or double-click gui_launcher.bat
+# Basic deep research with default settings
+python standalone/deep_research.py "Recent advances in solid-state batteries"
 
-# Restore custom tools to ~/.hermes
-powershell.exe -File restore.ps1
+# Connecting to a custom local LLM (e.g., LMStudio or Ollama)
+python standalone/deep_research.py "Compare Vaillant boiler F28 vs F29 error codes" --server http://127.0.0.1:11434
 
-# Dry-run (no changes)
-powershell.exe -File restore.ps1 -DryRun -SkipBackup -NoStopHermes
+# Increasing validation depth and saving to a specific report file
+python standalone/deep_research.py "History of Byzantine architecture" --validate 100 --output my_report.md
 
-# Compile check
-python -m py_compile plugins\web-tools\ddg\ddg_search.py
-python -m py_compile plugins\web-tools\ddg\visit_website_enhanced.py
-python -m py_compile hermes-agent\tools\ddg_search_tool.py
-
-# Run tests
-python -m pytest plugins/web-tools/ddg/test_query_variants.py
-python -m pytest hermes-agent/test_coverage_gate.py
-
-# Standalone CLI
-python standalone/deep_research.py "your query" --server http://localhost:8888
+# Quiet mode (suppresses progress logs for clean pipeline integration)
+python standalone/deep_research.py "NVIDIA RTX 5090 specs" --quiet
 ```
 
-## How It Works
+### 2. Standalone GUI Control Center
+For users who prefer visual feedback and an interface for tweaking search constraints, a PyQt5 GUI is available:
 
-### GUI (standalone/gui.py)
+```bash
+# Launch the graphical application
+python standalone/gui.py
 
-PyQt5 unified control center with two modes:
+# Alternatively, on Windows, just double-click:
+gui_launcher.bat
+```
+*The GUI allows you to easily switch between LLM endpoints (`/v1/models` or Ollama's `/api/tags`) and visualize the data pool as it validates in real-time.*
 
-**Hermes Mode:**
-- "Check & Restore" button — verifies all 5 web tools loaded
-- If tools missing → runs `restore.ps1` automatically
+### 3. Native Python Usage (Internal API)
+If you are integrating the core backend directly into another Python application, you can bypass the wrappers and call `search_deep` directly.
 
-**Standalone Mode:**
-- Provider selection: Ollama, LMStudio, Custom
-- Model dropdown — auto-populated from server
-- "Test" button — pings server, shows connected models
-- Proxy settings: checkbox + URL
-- Progress bar with stage labels
-- File logging toggle
+```python
+from plugins.web_tools.ddg.ddg_search import search_deep
 
-### Search Pipeline
-1. **Multi-query collection**: 4-6 query variants → 50-150 raw URLs per query
-2. **Homepage + search URL filter**: removes homepages and search result pages
-3. **Video URL filter**: blocks youtube, rutube, tiktok, vimeo for non-video queries
-4. **Blocklist filter**: removes analytics, ads, search engines, aggregators
-5. **URL validation**: HEAD-first (dead/blocked early), then GET for alive pages
-6. **Domain quarantine**: 403/captcha → skip domain; 503/timeout → defer to end
-7. **Content relevance scoring**: phrase-based keywords + word-overlap scoring
-8. **Level 2 expansion**: if relevant_alive < 15, expand from top alive pages
-9. **Deep-read**: platform-aware dedup, mirror domain handling
-10. **Evidence selection**: phrase keywords + gallery detection for visual queries
-11. **Synthesis**: LLM builds answer from evidence pack with inline citations
+# Explicitly defining constraints and variants for a technical lookup
+results = search_deep(
+    query="Vaillant boiler F28 error",
+    query_variants=[
+        "Vaillant boiler F28 error code causes fix",
+        "Vaillant F28 fault reset procedure official",
+        "Vaillant boiler F28 self-clean ignition repair",
+        "Vaillant F28 error forum threads community",
+    ],
+    validate=True,
+    max_validate=40,
+    timeout_per_url=3,
+)
 
-### Anti-Bot
-- **curl_cffi impersonation**: rotates Chrome 110-124 TLS fingerprints
-- **Proxy retry**: retries blocked URLs through proxy (main session always direct)
-- **Regional block detection**: catches Russian "данный контент недоступен" etc.
-- **JS-block detection**: catches "JavaScript is disabled" pages
-- **Overlay stripping**: removes age-gate, cookie consent, modal popups
-- **Domain quarantine**: 403/captcha → skip; 503/timeout → defer with limit
-
-### Image Extraction
-- `extract_fullsize_images()`: og:image, srcset, gallery, data-original, JSON-LD
-- `upgrade_to_fullsize()`: thumbnail URL → full-size via regex patterns
-- `image_search()`: Bing via Jina Reader (DDG i.js is broken)
-- **Gallery detection**: 15+ images + keywords → bonus relevance for visual queries
+print(f"Total validated sources found: {len(results)}")
+for item in results:
+    print(f"[{item['score']}] {item['url']} - {item['title']}")
+```
 
 ## Known Limitations
 
