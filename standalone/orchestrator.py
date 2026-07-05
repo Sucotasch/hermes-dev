@@ -561,6 +561,70 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
     return deep_pages, all_images
 
 
+def _filter_images_for_report(images, log=None):
+    """Filter images: skip bad formats, dedup by content hash, enforce minimum size.
+    
+    Only for visual queries. Downloads each image once to check hash and dimensions.
+    Uses 5 parallel workers for speed.
+    """
+    import httpx
+    from hashlib import md5
+    from PIL import Image
+    import io
+    from concurrent.futures import ThreadPoolExecutor
+
+    SKIP_FORMATS = ('.gif', '.svg', '.ico', '.cur', '.bmp', '.tiff')
+    MIN_WIDTH, MIN_HEIGHT = 600, 450
+
+    def _is_skippable(url):
+        url_lower = url.lower().split('?')[0]
+        return any(url_lower.endswith(ext) for ext in SKIP_FORMATS)
+
+    def _process(img):
+        if _is_skippable(img['url']):
+            return None
+        try:
+            resp = httpx.get(img['url'], timeout=10, follow_redirects=True)
+            if resp.status_code != 200:
+                return None
+            content_hash = md5(resp.content).hexdigest()
+            pil_img = Image.open(io.BytesIO(resp.content))
+            w, h = pil_img.size
+            return {'img': img, 'hash': content_hash, 'width': w, 'height': h}
+        except:
+            return None
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        results = list(ex.map(_process, images))
+
+    seen_hashes = set()
+    filtered = []
+    skipped_format = 0
+    skipped_hash = 0
+    skipped_size = 0
+    skipped_error = 0
+
+    for r in results:
+        if r is None:
+            skipped_error += 1
+            continue
+        if r['hash'] in seen_hashes:
+            skipped_hash += 1
+            continue
+        if r['width'] < MIN_WIDTH or r['height'] < MIN_HEIGHT:
+            skipped_size += 1
+            continue
+        seen_hashes.add(r['hash'])
+        r['img']['width'] = r['width']
+        r['img']['height'] = r['height']
+        filtered.append(r['img'])
+
+    if log:
+        log(f"    Format skip: {skipped_format}, Dedup: {skipped_hash}, Small: {skipped_size}, Errors: {skipped_error}")
+
+    return filtered
+
+
 def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=100, verbose=True, log=None, model="local",
                       proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
@@ -797,6 +861,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
         for img in images[:10]:
             log(f"    IMG: {img['url'][:80]} from {img['source'][:60]}")
     images = images if images_count <= 0 else images[:images_count]
+
+    # Step 8b: For visual queries — filter by format, dedup by content, check size
+    if query_type == "visual" and images:
+        before_count = len(images)
+        images = _filter_images_for_report(images, log)
+        if log:
+            log(f"  Image filter: {before_count} → {len(images)} (format/dedup/size)")
 
     # Step 9: Build evidence — only pages with actual content
     evidence = []
