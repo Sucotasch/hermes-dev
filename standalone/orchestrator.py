@@ -564,7 +564,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
 def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=100, verbose=True, log=None, model="local",
                       proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
-                      top_n=20, images_count=10, llm_sources=10, max_variants=6, max_imgs_per_page=5,
+                      top_n=30, images_count=30, llm_sources=20, max_variants=6, max_imgs_per_page=5,
                       search_count=100):
     """Execute full deep research pipeline.
 
@@ -593,6 +593,10 @@ def run_deep_research(query, server_url="http://localhost:8888",
     query_type = classify_query_type(query, server_url, model=model)
     timings["classify"] = round(time.time() - t, 1)
     log(f"  query_type: {query_type} ({timings['classify']}s)")
+
+    # For visual queries: no image limit (user wants all relevant images)
+    if query_type == "visual":
+        images_count = 0
 
     # Step 1b: Enrich query with aliases (for person queries)
     enriched_query = query

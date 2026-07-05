@@ -266,7 +266,7 @@ class ResearchThread(QThread):
 
     def __init__(self, query, server_url, max_validate, output_dir, model="local",
                  proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
-                 top_n=20, images_count=10, llm_sources=10, max_variants=6, max_imgs_per_page=5,
+                 top_n=30, images_count=30, llm_sources=20, max_variants=6, max_imgs_per_page=5,
                  search_count=100):
         super().__init__()
         self.query = query
@@ -434,7 +434,7 @@ class HermesGUI(QMainWindow):
         row_depth.addWidget(QLabel("Deep-read:"))
         self.spin_top_n = QSpinBox()
         self.spin_top_n.setRange(5, 50)
-        self.spin_top_n.setValue(20)
+        self.spin_top_n.setValue(30)
         self.spin_top_n.setMinimumWidth(60)
         self.spin_top_n.valueChanged.connect(self._on_depth_changed)
         row_depth.addWidget(self.spin_top_n)
@@ -442,7 +442,7 @@ class HermesGUI(QMainWindow):
         row_depth.addWidget(QLabel("Report src:"))
         self.spin_images = QSpinBox()
         self.spin_images.setRange(0, 200)
-        self.spin_images.setValue(10)
+        self.spin_images.setValue(30)
         self.spin_images.setSpecialValueText("0=all")
         self.spin_images.setToolTip("Max sources/images in report (0 = all collected)")
         self.spin_images.setMinimumWidth(60)
@@ -451,7 +451,7 @@ class HermesGUI(QMainWindow):
         row_depth.addWidget(QLabel("LLM src:"))
         self.spin_llm_src = QSpinBox()
         self.spin_llm_src.setRange(3, 30)
-        self.spin_llm_src.setValue(10)
+        self.spin_llm_src.setValue(20)
         self.spin_llm_src.setToolTip("Sources for LLM synthesis (separate from report)")
         self.spin_llm_src.setMinimumWidth(60)
         self.spin_llm_src.valueChanged.connect(self._on_depth_changed)
@@ -480,6 +480,14 @@ class HermesGUI(QMainWindow):
         self.spin_max_imgs.setToolTip("Max images extracted per page (0 = all)")
         self.spin_max_imgs.setMinimumWidth(60)
         row_depth.addWidget(self.spin_max_imgs)
+
+        row_depth.addWidget(QLabel("Preset:"))
+        self.cmb_preset = QComboBox()
+        self.cmb_preset.addItems(["Balanced", "Minimal", "Visual", "Maximum"])
+        self.cmb_preset.setToolTip("Quick parameter presets")
+        self.cmb_preset.setMinimumWidth(90)
+        self.cmb_preset.currentTextChanged.connect(self._on_preset_changed)
+        row_depth.addWidget(self.cmb_preset)
 
         btn_reset = QPushButton("Reset")
         btn_reset.setToolTip("Reset pipeline parameters to defaults")
@@ -611,12 +619,28 @@ class HermesGUI(QMainWindow):
     def _on_reset_params(self):
         """Reset pipeline parameters to defaults."""
         self.spin_validate.setValue(100)
-        self.spin_top_n.setValue(20)
-        self.spin_images.setValue(10)
-        self.spin_llm_src.setValue(10)
+        self.spin_top_n.setValue(30)
+        self.spin_images.setValue(30)
+        self.spin_llm_src.setValue(20)
         self.spin_variants.setValue(6)
         self.spin_search_count.setValue(100)
         self.spin_max_imgs.setValue(5)
+
+    def _on_preset_changed(self, preset):
+        """Apply parameter preset."""
+        presets = {
+            "Minimal": {"top_n": 10, "images": 10, "llm_src": 5, "variants": 3, "search": 50, "max_imgs": 3},
+            "Balanced": {"top_n": 30, "images": 30, "llm_src": 20, "variants": 6, "search": 100, "max_imgs": 5},
+            "Visual": {"top_n": 30, "images": 0, "llm_src": 20, "variants": 6, "search": 100, "max_imgs": 10},
+            "Maximum": {"top_n": 50, "images": 0, "llm_src": 30, "variants": 10, "search": 200, "max_imgs": 0},
+        }
+        p = presets.get(preset, presets["Balanced"])
+        self.spin_top_n.setValue(p["top_n"])
+        self.spin_images.setValue(p["images"])
+        self.spin_llm_src.setValue(p["llm_src"])
+        self.spin_variants.setValue(p["variants"])
+        self.spin_search_count.setValue(p["search"])
+        self.spin_max_imgs.setValue(p["max_imgs"])
 
     def _on_proxy_changed(self):
         """Save proxy settings to ~/.hermes/proxy.env for Hermes mode."""
