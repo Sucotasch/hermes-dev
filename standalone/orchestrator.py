@@ -563,15 +563,17 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
 
 def _filter_images_for_report(images, log=None):
     """Filter images: skip bad formats, dedup by content hash, enforce minimum size.
-    
-    Only for visual queries. Downloads each image once to check hash and dimensions.
-    Uses 5 parallel workers for speed.
+
+    Two-phase download:
+    1. Direct download (3s timeout) — fast for accessible images
+    2. Proxy retry for failed images — recovers blocked URLs
     """
     import httpx
     from hashlib import md5
     from PIL import Image
     import io
     from concurrent.futures import ThreadPoolExecutor
+    import ddg_search
 
     SKIP_FORMATS = ('.gif', '.svg', '.ico', '.cur', '.bmp', '.tiff')
     MIN_WIDTH, MIN_HEIGHT = 600, 450
@@ -580,47 +582,87 @@ def _filter_images_for_report(images, log=None):
         url_lower = url.lower().split('?')[0]
         return any(url_lower.endswith(ext) for ext in SKIP_FORMATS)
 
-    def _process(img):
+    def _try_download(url, proxy=None):
+        try:
+            resp = httpx.get(url, timeout=3, follow_redirects=True, proxy=proxy)
+            if resp.status_code == 200:
+                return resp.content
+        except:
+            pass
+        return None
+
+    # Phase 1: Direct download
+    quarantine = []
+    seen_hashes = set()
+    filtered = []
+
+    def _process_phase1(img):
         if _is_skippable(img['url']):
             return None
+        content = _try_download(img['url'], proxy=None)
+        if content is None:
+            return {'img': img, 'quarantine': True}
         try:
-            resp = httpx.get(img['url'], timeout=10, follow_redirects=True)
-            if resp.status_code != 200:
-                return None
-            content_hash = md5(resp.content).hexdigest()
-            pil_img = Image.open(io.BytesIO(resp.content))
+            content_hash = md5(content).hexdigest()
+            pil_img = Image.open(io.BytesIO(content))
             w, h = pil_img.size
-            return {'img': img, 'hash': content_hash, 'width': w, 'height': h}
+            return {'img': img, 'hash': content_hash, 'width': w, 'height': h, 'quarantine': False}
         except:
             return None
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        results = list(ex.map(_process, images))
-
-    seen_hashes = set()
-    filtered = []
-    skipped_format = 0
-    skipped_hash = 0
-    skipped_size = 0
-    skipped_error = 0
+        results = list(ex.map(_process_phase1, images))
 
     for r in results:
         if r is None:
-            skipped_error += 1
+            continue
+        if r.get('quarantine'):
+            quarantine.append(r['img'])
             continue
         if r['hash'] in seen_hashes:
-            skipped_hash += 1
             continue
         if r['width'] < MIN_WIDTH or r['height'] < MIN_HEIGHT:
-            skipped_size += 1
             continue
         seen_hashes.add(r['hash'])
         r['img']['width'] = r['width']
         r['img']['height'] = r['height']
         filtered.append(r['img'])
 
+    # Phase 2: Proxy retry for quarantined images
+    if quarantine and ddg_search.USE_PROXY and ddg_search.PROXY_URL:
+        proxy = ddg_search.PROXY_URL
+
+        def _process_phase2(img):
+            if _is_skippable(img['url']):
+                return None
+            content = _try_download(img['url'], proxy=proxy)
+            if content is None:
+                return None
+            try:
+                content_hash = md5(content).hexdigest()
+                pil_img = Image.open(io.BytesIO(content))
+                w, h = pil_img.size
+                return {'img': img, 'hash': content_hash, 'width': w, 'height': h}
+            except:
+                return None
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            results = list(ex.map(_process_phase2, quarantine))
+
+        for r in results:
+            if r is None:
+                continue
+            if r['hash'] in seen_hashes:
+                continue
+            if r['width'] < MIN_WIDTH or r['height'] < MIN_HEIGHT:
+                continue
+            seen_hashes.add(r['hash'])
+            r['img']['width'] = r['width']
+            r['img']['height'] = r['height']
+            filtered.append(r['img'])
+
     if log:
-        log(f"    Format skip: {skipped_format}, Dedup: {skipped_hash}, Small: {skipped_size}, Errors: {skipped_error}")
+        log(f"    Image filter: {len(images)} → {len(filtered)} (quarantine: {len(quarantine)}, proxy recovered: {len(filtered) - len(seen_hashes) + len(quarantine)})")
 
     return filtered
 
