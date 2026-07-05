@@ -641,12 +641,15 @@ def run_deep_research(query, server_url="http://localhost:8888",
     homepage_urls = []
     search_urls = []
     video_urls = []
+    service_urls = []
     kept_results = []
     _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
     _SEARCH_PATTERNS = ("/search", "/images/search", "search?q=", "search?s=", "/search/")
     _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "rutube", "yandex.ru/video",
                       "dzen.ru/video", "vimeo.com", "tiktok.com")
     _VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
+    _SERVICE_PATHS = ("/feed", "/preload", "/place", "/login", "/signin",
+                      "/signup", "/register", "/settings", "/dashboard", "/account")
     for r in all_results:
         url = r.get("url", "")
         if ddg_search.is_blocked_domain(url):
@@ -658,6 +661,8 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 homepage_urls.append(url)
             elif any(p in url_lower for p in _SEARCH_PATTERNS):
                 search_urls.append(url)
+            elif any(p in path for p in _SERVICE_PATHS):
+                service_urls.append(url)
             elif query_type != "video" and (
                 any(d in url_lower for d in _VIDEO_DOMAINS) or
                 any(p in url_lower for p in _VIDEO_PATH_PATTERNS)):
@@ -666,7 +671,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 kept_results.append(r)
     all_results = kept_results
     if log:
-        log(f"  After blocklist: {len(all_results)} kept, {len(blocked_urls)} blocked, {len(homepage_urls)} homepages, {len(search_urls)} search-URLs, {len(video_urls)} video")
+        log(f"  After blocklist: {len(all_results)} kept, {len(blocked_urls)} blocked, {len(homepage_urls)} homepages, {len(search_urls)} search-URLs, {len(video_urls)} video, {len(service_urls)} service")
         for u in blocked_urls:
             log(f"    BLOCKED: {u[:90]}")
         for u in homepage_urls:

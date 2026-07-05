@@ -1123,6 +1123,11 @@ BLOCKED_DOMAINS = {
     "auto.yandex.ru", "dzen.ru",
     "e1.ru", "gismeteo.ru",
     "vk.com", "ok.ru",
+    # Social media / professional networks (JS-blocked, internal routes)
+    "linkedin.com", "facebook.com", "instagram.com", "twitter.com",
+    "t.me",  # Telegram preview pages
+    # Map services (no article content)
+    "maps.apple.com", "mapcarta.com",
 }
 
 # Visual-specific allowlist (override blocklist for image queries)
