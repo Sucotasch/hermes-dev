@@ -155,11 +155,11 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
     }
 
 
-def _query_variants_wrapper(query):
+def _query_variants_wrapper(query, query_type="general"):
     """Return generated variants; fall back to static heuristics if unavailable."""
     try:
         import query_variants
-        generated = query_variants.generate(query)
+        generated = query_variants.generate(query, query_type=query_type)
         if generated:
             return generated
     except Exception:
@@ -207,7 +207,7 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
     if search_deep is None:
         return {"error": "ddg backend unavailable"}
 
-    variants = _query_variants_wrapper(query)
+    variants = _query_variants_wrapper(query, query_type=query_type)
 
     seen_page = set()
     pages = []

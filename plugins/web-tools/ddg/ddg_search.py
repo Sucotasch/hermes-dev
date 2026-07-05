@@ -14,6 +14,7 @@ Improvements over v2:
 
 import importlib.util
 import json, re, sys, time, random, os, urllib.parse
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 
@@ -56,7 +57,6 @@ USE_PROXY = bool(_CONFIGURED_PROXY)
 PROXY_URL = _CONFIGURED_PROXY
 JINA_URL = "https://r.jina.ai/"
 MAX_CHARS = 8000
-TIME_BETWEEN = 1.5  # Reduced because curl_cffi is faster
 
 # ── curl_cffi impersonation versions ────────────────────────────────────────
 # Rotate between supported Chrome versions to vary TLS fingerprint
@@ -84,19 +84,8 @@ UA_POOL = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 OPR/110.0.0.0",
 ]
 
-# ── Timing & throttle ───────────────────────────────────────────────────────
-_last_req_time = 0
-
 def _random_ua():
     return random.choice(UA_POOL)
-
-def _throttle():
-    global _last_req_time
-    now = time.time()
-    elapsed = now - _last_req_time
-    _last_req_time = now
-    if elapsed < TIME_BETWEEN:
-        time.sleep(TIME_BETWEEN - elapsed + random.uniform(0, 0.3))
 
 # ── curl_cffi Session ───────────────────────────────────────────────────────
 # One session per domain for cookie persistence
@@ -542,8 +531,7 @@ class _DDGResultParser:
         """Parse DDG HTML results using bs4."""
         if not html:
             return self.results
-        
-            from bs4 import BeautifulSoup
+
         try:
             soup = BeautifulSoup(html, "lxml")
         except Exception:
@@ -628,21 +616,17 @@ def _parse_google_results(html, count):
 
 # ── Web Search ─────────────────────────────────────────────────────────────
 def web_search(query, page=1, count=5, region="wt-wt", safe="auto"):
-    """Search the web using multiple fallback strategies.
-    Default ``count`` intentionally stays small so a tool call returns only
-    five candidate URLs.  If you want deep pagination, cache results across
-    pages and merge them client-side.
+    """Search the web using DuckDuckGo engines with DDGS supplement.
+    DuckDuckGo primary + DDGS always runs for broader coverage.
     """
-    # Try multiple search strategies in order of reliability
     strategies = [
         ("duckduckgo", lambda: _search_ddg(query, page, count, region, safe)),
-        ("jina-ddg", lambda: _search_jina_ddg(query, page, count, region, safe)),
-        ("searxng", lambda: _search_searx(query, page, count)),
-        ("jina-duckduckgo", lambda: _search_jina(query, page, count)),
     ]
 
     import time as _time
 
+    # DuckDuckGo primary
+    engine_results = []
     for name, strategy in strategies:
         result = None
         for attempt in range(2):
@@ -654,14 +638,47 @@ def web_search(query, page=1, count=5, region="wt-wt", safe="auto"):
                     _time.sleep(2)
                 continue
             if result and result.get("results"):
-                result["_source"] = name
-                return result
+                engine_results = result["results"]
+                break
             if attempt == 0:
                 print(f"[ddg-search] Strategy '{name}' returned no results, retrying...", file=sys.stderr)
                 _time.sleep(2)
             else:
                 print(f"[ddg-search] Strategy '{name}' returned no results (final)", file=sys.stderr)
                 break
+        if engine_results:
+            break
+
+    # DDGS always runs to expand coverage (different result set than duckduckgo)
+    try:
+        from ddgs import DDGS
+        with DDGS() as client:
+            extra = client.text(query)
+        if extra:
+            query_words = set(query.lower().split())
+            ddgs_results = []
+            for item in extra:
+                href = item.get("href") or item.get("url")
+                if not href:
+                    continue
+                text = (item.get("title", "") + " " + item.get("body", "")).lower()
+                matches = sum(1 for w in query_words if w in text)
+                if matches >= 2:
+                    ddgs_results.append({"title": item.get("title", ""), "url": href, "snippet": item.get("body", "")})
+            # Merge: engines first, then DDGS (deduplicated)
+            seen = set()
+            merged = []
+            for r in engine_results + ddgs_results:
+                url = r.get("url", "")
+                if url and url not in seen:
+                    seen.add(url)
+                    merged.append(r)
+            engine_results = merged
+    except Exception:
+        pass
+
+    if engine_results:
+        return {"results": engine_results[:count], "count": min(len(engine_results), count), "_source": "merged"}
 
     return {"error": "All search strategies failed", "results": [], "count": 0}
 
@@ -1152,9 +1169,8 @@ class _ContentParser:
     def parse(self, html):
         """Parse HTML and extract title, headings, links, images."""
         if not html:
-            from bs4 import BeautifulSoup
             return self
-        
+
         try:
             soup = BeautifulSoup(html, "lxml")
         except Exception:
@@ -1265,6 +1281,25 @@ def upgrade_to_fullsize(url):
     url = re.sub(r'[?&](?:w|h|width|height|size|dim|quality|q)=\d+', '', url)
     url = re.sub(r'\?$', '', url)  # Clean trailing ?
 
+    # 6. Site-specific: Imgur (thumbs → images, _b → _o)
+    if 'imgur.com' in url:
+        url = re.sub(r'/?thumbs/', '/images/', url)
+        url = re.sub(r'_b(\.\w+)$', r'_o\1', url)
+
+    # 7. Site-specific: Twitter/X (:orig suffix, strip format params)
+    if 'pbs.twimg.com' in url:
+        url = re.sub(r'\?format=\w+&name=\w+', '', url)
+        if ':orig' not in url:
+            url = url + ':orig' if '?' not in url else url
+
+    # 8. Site-specific: Photobucket (thumbs → images)
+    if 'photobucket.com' in url:
+        url = re.sub(r'/thumbs/', '/images/', url)
+
+    # 9. Site-specific: Flickr (_q → _o for original)
+    if 'staticflickr.com' in url or 'live.staticflickr.com' in url:
+        url = re.sub(r'_(?:q|sq|t|s|m|n)(\.(?:jpg|jpeg|png))$', r'_o\1', url)
+
     return url if url != original else original
 
 
@@ -1309,17 +1344,58 @@ def extract_fullsize_images(html, base_url=""):
         if best_url:
             urls.append(best_url)
 
-    # 4. data-original / data-lazy-src / data-full-src (lazy-load full-size)
-    for m in re.finditer(r'data-(?:original|lazy-src|full-src|hi-res-src)="([^"]+)"', html, re.I):
+    # 4. data-* lazy-load attributes (expanded set)
+    for m in re.finditer(r'data-(?:src|original|lazy-src|full-src|hi-res-src|bg|poster|image|srcset|load|source|lazy|high-res|hires|retina|full|fullsize|fullsizeurl|max-res|maxres)="([^"]+)"', html, re.I):
         urls.append(m.group(1))
 
-    # 5. JSON-LD image field
+    # 5. Framework-specific: v-lazy (Vue), [lazyLoad] (Angular), ng-src (AngularJS)
+    for m in re.finditer(r'v-lazy\s*=\s*["\'](https?://[^"\']+)["\']', html, re.I):
+        urls.append(m.group(1))
+    for m in re.finditer(r'\[lazyLoad\]\s*=\s*["\'](https?://[^"\']+)["\']', html, re.I):
+        urls.append(m.group(1))
+    for m in re.finditer(r'ng-src\s*=\s*["\'](https?://[^"\']+)["\']', html, re.I):
+        urls.append(m.group(1))
+
+    # 6. Inline CSS background-image: url(...)
+    for m in re.finditer(r'style\s*=\s*"[^"]*url\(["\']?([^)"\']+)["\']?\)', html, re.I):
+        u = m.group(1)
+        if re.search(r'\.(?:jpg|jpeg|png|webp|gif|avif)', u, re.I):
+            urls.append(u)
+
+    # 7. JS string URLs in <script> blocks
+    for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.I | re.S):
+        script = m.group(1)
+        for u in re.findall(r'["\'](https?://[^"\']+\.(?:jpg|jpeg|png|gif|webp|avif)(?:\?[^"\']*)?)["\']', script, re.I):
+            urls.append(u)
+        for u in re.findall(r'\.src\s*=\s*["\'](https?://[^"\']+)["\']', script, re.I):
+            if re.search(r'\.(?:jpg|jpeg|png|gif|webp|avif)', u, re.I):
+                urls.append(u)
+
+    # 8. JSON-in-data-attribute: data-config='{"image":"..."}'
+    for m in re.finditer(r'data-\w+\s*=\s*["\'](\{[^"\']*\})["\']', html, re.I):
+        try:
+            import json as _json
+            data = _json.loads(m.group(1))
+            if isinstance(data, dict):
+                for v in data.values():
+                    if isinstance(v, str) and re.search(r'^https?://.+\.(?:jpg|jpeg|png|webp|gif|avif)', v, re.I):
+                        urls.append(v)
+        except Exception:
+            pass
+
+    # 9. JSON-LD image field
     for m in re.finditer(r'"image"\s*:\s*"(https?://[^"]+)"', html):
         urls.append(m.group(1))
 
     # 6. <figure> + <a href> pattern (gallery pages)
     for m in re.finditer(r'<figure[^>]*>\s*<a[^>]+href="([^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"', html, re.I):
         urls.append(m.group(1))
+
+    # 10. Catch-all: any attribute containing image URL
+    for m in re.finditer(r'<[^>]+\s(?:\w+-)?\w+\s*=\s*["\']([^"\']+\.(?:jpg|jpeg|png|webp|gif|avif)(?:\?[^"\']*)?)["\']', html, re.I):
+        u = m.group(1)
+        if u not in urls and re.search(r'^https?://', u, re.I):
+            urls.append(u)
 
     # Resolve relative URLs and deduplicate
     seen = set()
@@ -1338,6 +1414,9 @@ def extract_fullsize_images(html, base_url=""):
         seen.add(url)
         # Filter tracking pixels
         if _TRACKING_IMG_RE2.search(url):
+            continue
+        # Filter trash media (icons, animated gifs, svg)
+        if re.search(r'\.(?:gif|ico|svg|cur)(?:\?|$)', url, re.I):
             continue
         # Upgrade thumbnail to full-size
         url = upgrade_to_fullsize(url)
@@ -1448,9 +1527,8 @@ def _classify_by_content(url, title, body_text):
 
 def _extract_image_urls(html, domain_base, max_count=3):
     """Extract image URLs from HTML for preview.
-    
+
     Returns list of {src, alt} dicts for first N <img> tags.
-        from bs4 import BeautifulSoup
     Handles relative URLs by prepending domain_base.
     """
     urls = []
@@ -1551,6 +1629,8 @@ def _check_url_live(url, timeout=10):
         result["error"] = "no session"
         return result
 
+    proxy_session = None
+
     try:
         head_resp = session.head(url, timeout=timeout, allow_redirects=True)
         result["status"] = head_resp.status_code
@@ -1568,10 +1648,27 @@ def _check_url_live(url, timeout=10):
                         proxies={"http": PROXY_URL, "https": PROXY_URL},
                         verify=False, timeout=timeout,
                     )
-                    proxy_head = proxy_session.head(url, timeout=timeout, allow_redirects=True)
-                    if proxy_head.status_code < 400:
-                        result["status"] = proxy_head.status_code
+                    # For 503: try GET (not HEAD) — some servers return 503 on HEAD but 200 on GET
+                    if result["status"] == 503:
+                        proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
+                    else:
+                        proxy_resp = proxy_session.head(url, timeout=timeout, allow_redirects=True)
+                    if proxy_resp.status_code < 400:
+                        result["status"] = proxy_resp.status_code
                         result["blocked"] = False
+                        result["proxy_used"] = True
+                except Exception:
+                    pass
+            # For 503: retry once after short delay (server may recover)
+            if result["status"] == 503 and result.get("blocked") is not False:
+                try:
+                    time.sleep(2)
+                    retry_resp = session.get(url, timeout=timeout, allow_redirects=True)
+                    if retry_resp.status_code < 400:
+                        result["status"] = retry_resp.status_code
+                        result["blocked"] = False
+                        # Store body from retry to avoid re-fetch
+                        result["body"] = retry_resp.text
                 except Exception:
                     pass
             if result.get("blocked") is False:
@@ -1971,44 +2068,39 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
 
                 alive_count += 1
 
-            # ── Step 3: Content analysis for live pages ──
-            # Raw text extraction (Readability is applied later in deep-read phase)
-            body_html = check.get('body') or ''
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(body_html, 'html.parser')
-                text = soup.get_text(separator=' ', strip=True)
-            except Exception:
-                text = re.sub(r'<[^>]+>', ' ', body_html)
-                text = re.sub(r'\s+', ' ', text).strip()
+                # ── Step 3: Content analysis for live pages ──
+                body_html = check.get('body') or ''
+                try:
+                    soup = BeautifulSoup(body_html, 'html.parser')
+                    text = soup.get_text(separator=' ', strip=True)
+                except Exception:
+                    text = re.sub(r'<[^>]+>', ' ', body_html)
+                    text = re.sub(r'\s+', ' ', text).strip()
 
-            res_out = dict(res)
-            res_out['alive'] = True
-            res_out['status'] = check['status']
-            res_out['content_type'] = check['content_type']
-            res_out['content_length'] = check['content_length']
-            res_out['text_length'] = check.get('text_length', len(text))
-            res_out['text_words'] = check['text_words']
-            res_out['text'] = text[:4000]
+                title = res.get('title', '') or res.get('snippet', '')[:100]
+                res_out = dict(res)
+                res_out['alive'] = True
+                res_out['status'] = check['status']
+                res_out['content_type'] = check['content_type']
+                res_out['content_length'] = check['content_length']
+                res_out['text_length'] = check.get('text_length', len(text))
+                res_out['text_words'] = check['text_words']
+                res_out['text'] = text[:4000]
 
-            # Relevance scoring
-            res_out['relevance'] = round(_relevance_score(query, title, text), 2)
+                res_out['relevance'] = round(_relevance_score(query, title, text), 2)
 
-            # Image count from HTML
-            image_count = len(re.findall(r'<img[^>]+src=', body_html))
-            res_out['image_count'] = image_count
+                image_count = len(re.findall(r'<img[^>]+src=', body_html))
+                res_out['image_count'] = image_count
 
-            # Extract image URLs for preview
-            if image_count > 0:
-                res_out['image_urls'] = _extract_image_urls(body_html, url, max_count=3)
+                if image_count > 0:
+                    res_out['image_urls'] = _extract_image_urls(body_html, url, max_count=3)
 
-            # Category classification
-            if classify:
-                cat, conf = _classify_by_content(url, title, text)
-                res_out['category'] = cat
-                res_out['category_confidence'] = round(conf, 2)
+                if classify:
+                    cat, conf = _classify_by_content(url, title, text)
+                    res_out['category'] = cat
+                    res_out['category_confidence'] = round(conf, 2)
 
-            validated.append(res_out)
+                validated.append(res_out)
 
     # Step 4: Soft bot-challenge tagging on validated items
     _tag_bot_challenge(validated)

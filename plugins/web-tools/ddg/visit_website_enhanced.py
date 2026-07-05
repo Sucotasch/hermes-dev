@@ -24,7 +24,6 @@ USE_PROXY = False
 PROXY_URL = "http://127.0.0.1:2080"
 JINA_URL = "https://r.jina.ai/"
 MAX_CHARS = 8000
-TIME_BETWEEN = 1.25
 
 # ── curl_cffi impersonation ────────────────────────────────────────────────
 IMPERSONATE_POOL = ["chrome110", "chrome116", "chrome120", "chrome124"]
@@ -50,17 +49,6 @@ UA_POOL = [
     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6367.82 Mobile Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 OPR/110.0.0.0",
 ]
-
-# ── Timing & throttle ───────────────────────────────────────────────────────
-_last_req = 0
-
-def _throttle():
-    global _last_req
-    now = time.time()
-    elapsed = now - _last_req
-    _last_req = now
-    if elapsed < TIME_BETWEEN:
-        time.sleep(TIME_BETWEEN - elapsed + random.uniform(0, 0.3))
 
 # ── curl_cffi Session ───────────────────────────────────────────────────────
 _sessions = {}
@@ -91,7 +79,6 @@ def _fetch(url, referrer=None, cookies=None):
     Falls back to httpx, then Jina.
     NO throttle for curl_cffi — proxy handles rotation.
     """
-    _last_req = time.time()
     ua = random.choice(UA_POOL)
     
     # Build headers
@@ -461,6 +448,26 @@ def upgrade_to_fullsize(url):
     url = re.sub(r'^https?://thumb\.', 'https://cdn.', url)
     url = re.sub(r'[?&](?:w|h|width|height|size|dim|quality|q)=\d+', '', url)
     url = re.sub(r'\?$', '', url)
+
+    # Site-specific: Imgur (thumbs → images, _b → _o)
+    if 'imgur.com' in url:
+        url = re.sub(r'/?thumbs/', '/images/', url)
+        url = re.sub(r'_b(\.\w+)$', r'_o\1', url)
+
+    # Site-specific: Twitter/X (:orig suffix, strip format params)
+    if 'pbs.twimg.com' in url:
+        url = re.sub(r'\?format=\w+&name=\w+', '', url)
+        if ':orig' not in url:
+            url = url + ':orig' if '?' not in url else url
+
+    # Site-specific: Photobucket (thumbs → images)
+    if 'photobucket.com' in url:
+        url = re.sub(r'/thumbs/', '/images/', url)
+
+    # Site-specific: Flickr (_q → _o for original)
+    if 'staticflickr.com' in url or 'live.staticflickr.com' in url:
+        url = re.sub(r'_(?:q|sq|t|s|m|n)(\.(?:jpg|jpeg|png))$', r'_o\1', url)
+
     return url if url != original else original
 
 
@@ -495,14 +502,55 @@ def extract_fullsize_images(html, base_url=""):
         if best_url:
             urls.append(best_url)
 
-    for m in re.finditer(r'data-(?:original|lazy-src|full-src|hi-res-src)="([^"]+)"', html, re.I):
+    for m in re.finditer(r'data-(?:src|original|lazy-src|full-src|hi-res-src|bg|poster|image|srcset|load|source|lazy|high-res|hires|retina|full|fullsize|fullsizeurl|max-res|maxres)="([^"]+)"', html, re.I):
         urls.append(m.group(1))
+
+    # Framework-specific: v-lazy (Vue), [lazyLoad] (Angular), ng-src (AngularJS)
+    for m in re.finditer(r'v-lazy\s*=\s*["\'](https?://[^"\']+)["\']', html, re.I):
+        urls.append(m.group(1))
+    for m in re.finditer(r'\[lazyLoad\]\s*=\s*["\'](https?://[^"\']+)["\']', html, re.I):
+        urls.append(m.group(1))
+    for m in re.finditer(r'ng-src\s*=\s*["\'](https?://[^"\']+)["\']', html, re.I):
+        urls.append(m.group(1))
+
+    # Inline CSS background-image: url(...)
+    for m in re.finditer(r'style\s*=\s*"[^"]*url\(["\']?([^)"\']+)["\']?\)', html, re.I):
+        u = m.group(1)
+        if re.search(r'\.(?:jpg|jpeg|png|webp|gif|avif)', u, re.I):
+            urls.append(u)
+
+    # JS string URLs in <script> blocks
+    for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.I | re.S):
+        script = m.group(1)
+        for u in re.findall(r'["\'](https?://[^"\']+\.(?:jpg|jpeg|png|gif|webp|avif)(?:\?[^"\']*)?)["\']', script, re.I):
+            urls.append(u)
+        for u in re.findall(r'\.src\s*=\s*["\'](https?://[^"\']+)["\']', script, re.I):
+            if re.search(r'\.(?:jpg|jpeg|png|gif|webp|avif)', u, re.I):
+                urls.append(u)
+
+    # JSON-in-data-attribute: data-config='{"image":"..."}'
+    for m in re.finditer(r'data-\w+\s*=\s*["\'](\{[^"\']*\})["\']', html, re.I):
+        try:
+            import json as _json
+            data = _json.loads(m.group(1))
+            if isinstance(data, dict):
+                for v in data.values():
+                    if isinstance(v, str) and re.search(r'^https?://.+\.(?:jpg|jpeg|png|webp|gif|avif)', v, re.I):
+                        urls.append(v)
+        except Exception:
+            pass
 
     for m in re.finditer(r'"image"\s*:\s*"(https?://[^"]+)"', html):
         urls.append(m.group(1))
 
     for m in re.finditer(r'<figure[^>]*>\s*<a[^>]+href="([^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"', html, re.I):
         urls.append(m.group(1))
+
+    # Catch-all: any attribute containing image URL
+    for m in re.finditer(r'<[^>]+\s(?:\w+-)?\w+\s*=\s*["\']([^"\']+\.(?:jpg|jpeg|png|webp|gif|avif)(?:\?[^"\']*)?)["\']', html, re.I):
+        u = m.group(1)
+        if u not in urls and re.search(r'^https?://', u, re.I):
+            urls.append(u)
 
     seen = set()
     resolved = []
@@ -518,6 +566,9 @@ def extract_fullsize_images(html, base_url=""):
             continue
         seen.add(url)
         if _TRACKING_IMG_RE.search(url):
+            continue
+        # Filter trash media (icons, animated gifs, svg)
+        if re.search(r'\.(?:gif|ico|svg|cur)(?:\?|$)', url, re.I):
             continue
         url = upgrade_to_fullsize(url)
         resolved.append(url)

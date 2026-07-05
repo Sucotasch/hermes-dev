@@ -11,6 +11,15 @@ This is **not** the main Hermes application. It's a deep research pipeline for n
 3. Run restore: `powershell.exe -File restore.ps1`
 4. Dry-run first: add `-DryRun -SkipBackup -NoStopHermes`
 5. Verify after restore: `python -m py_compile` on key files under `~/.hermes/`
+6. On Linux/macOS (no PowerShell): copy files manually:
+   ```bash
+   cp hermes-agent/tools/ddg_search_tool.py ~/.hermes/hermes-agent/tools/
+   cp hermes-agent/tools/browser_dialog_tool.py ~/.hermes/hermes-agent/tools/
+   cp plugins/web-tools/ddg/*.py ~/.hermes/plugins/web-tools/ddg/
+   cp skills/web-deep-search/SKILL.md ~/.hermes/skills/web-deep-search/
+   cp skills/restore-context/SKILL.md ~/.hermes/skills/restore-context/
+   cp CONTEXT.md ~/.hermes/
+   ```
 
 **Never edit `~/.hermes\` custom files directly without mirroring back to this repo.**
 
@@ -36,7 +45,11 @@ python -m py_compile plugins\web-tools\ddg\visit_website_enhanced.py
 python -m py_compile hermes-agent\tools\ddg_search_tool.py
 ```
 
-No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone pytest files.
+No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone pytest files. No linting or formatting config.
+
+## Restore script details
+
+`restore.ps1` copies 7 files (not just the plugins), backs up skill files before overwriting, and runs a compose smoke probe after restore. The probe tests `web_deep_research` with `compose=True` to verify the tool chain works end-to-end.
 
 ## Architecture
 
@@ -58,6 +71,12 @@ No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone
 
 `web_search_deep`, `web_expand_and_fetch`, `visit_website_tool`, `image_search`, `web_deep_research`, `web_extract`, `web_search`
 
+### Standalone CLI
+
+```bash
+python standalone/deep_research.py "your query" --server http://localhost:8888
+```
+
 ## Invariants — do not break these
 
 - `registry.register(...)` calls must stay at **top level** of `ddg_search_tool.py`. Moving them inside conditionals or functions breaks Hermes tool discovery.
@@ -78,6 +97,7 @@ No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone
 - 40-46% of URLs are blocked (HTTP 403). Proxy retry helps ~5%. Further improvement needs headless browser.
 - IMDB, Wikipedia, Reddit blocked by Cloudflare/JS. JS-block detection flags these correctly.
 - `content_relevance_score` is keyword-based; can't disambiguate "Sara James" from "Sara St James" without explicit logic.
+- Platform domains (blogspot, livejournal) use path-based dedup, not base domain.
 
 ## Deep research pipeline rules
 

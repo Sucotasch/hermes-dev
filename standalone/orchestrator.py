@@ -151,35 +151,27 @@ def _clean_content(text):
 
 
 def _has_query_keywords(text, query_str):
-    """Check if query core phrase appears in text as standalone phrase.
-    Extracts first 2-3 significant words as the core entity, checks as phrase
-    with word boundary verification."""
+    """Check if query core phrase appears in text as consecutive 2+ word phrase.
+    Extracts significant words (allowing 2-char words like 'st'), checks 3-word
+    then 2-word phrases with word boundary. Single words are NOT matched."""
     if not query_str or not text:
         return False
-    # Extract significant words (len > 2, not common stop words)
+    # Stop words to exclude
     stop_words = {"the", "and", "for", "with", "from", "that", "this", "are", "was",
                   "has", "had", "have", "not", "but", "can", "will", "all", "any",
                   "free", "image", "gallery", "photo", "photos", "picture", "pictures",
                   "video", "videos", "forum", "site", "web", "online", "best", "top",
-                  "new", "old", "all", "more", "very", "just", "about", "also"}
+                  "new", "old", "more", "very", "just", "about", "also"}
     words = [w.lower() for w in query_str.split()
-             if len(w) > 2 and w.lower() not in stop_words]
-    if not words:
+             if len(w) >= 2 and w.lower() not in stop_words]
+    if len(words) < 2:
         return False
     text_lower = text.lower()
-    # Check 3-word phrase, then 2-word — with word boundary
     import re
     for n in (3, 2):
         for i in range(len(words) - n + 1):
             phrase = " ".join(words[i:i+n])
-            # Word boundary: phrase must not be part of a larger word
             pattern = r'(?<!\w)' + re.escape(phrase) + r'(?!\w)'
-            if re.search(pattern, text_lower):
-                return True
-    # Fallback: single word must be at least 4 chars to avoid false positives
-    for w in words:
-        if len(w) >= 4:
-            pattern = r'(?<!\w)' + re.escape(w) + r'(?!\w)'
             if re.search(pattern, text_lower):
                 return True
     return False
@@ -391,6 +383,9 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
                     item["text"] = text
                     item["alive"] = True
                     item["text_length"] = check.get("text_length", 0)
+                    # For visual queries: extract image URLs from validation HTML
+                    if query_type == "visual" and body:
+                        item["val_images"] = ddg_search.extract_fullsize_images(body, url)[:20]
                     text_rel = ddg_search.content_relevance_score(query, text)
                     # Visual img_bonus: only if keywords present AND 15+ images (gallery)
                     has_keywords = _has_query_keywords(text, query)
@@ -454,7 +449,7 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
     return validated, alive_count
 
 
-def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, query_type="general"):
+def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, query_type="general", max_imgs_per_page=5):
     """Deep-read pages: fetch full content + extract images from raw HTML.
     Applies content cleaning, relevance filtering, and domain dedup (max 2 per domain).
     For visual queries: image count boosts relevance to avoid dropping image-rich pages."""
@@ -495,8 +490,6 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 continue
 
             imgs = ddg_search.extract_fullsize_images(raw_html, url)
-
-            # Extract main content using Readability-style algorithm
             text = _extract_main_content(raw_html)
             text = _clean_content(text)
 
@@ -531,7 +524,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                     bonus_str = f" +img={img_bonus:.2f}" if img_bonus else ""
                     kw_str = " kw=✓" if has_keywords else ""
                     log(f"    OK [{len(deep_pages)}] rel={final_score:.2f} (text={content_score:.2f}{bonus_str}) imgs={img_count}{kw_str} text={text_len} | {url[:60]}")
-                for img_url in imgs[:5]:
+                for img_url in (imgs if max_imgs_per_page <= 0 else imgs[:max_imgs_per_page]):
                     all_images.append({
                         "url": img_url,
                         "source_page": url,
@@ -545,7 +538,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 domain_counts[key] = domain_counts.get(key, 0) + 1
                 if log:
                     log(f"    OK [{len(deep_pages)}] visual-only imgs={img_count} kw=✓ text={text_len} | {url[:60]}")
-                for img_url in imgs[:5]:
+                for img_url in (imgs if max_imgs_per_page <= 0 else imgs[:max_imgs_per_page]):
                     all_images.append({
                         "url": img_url,
                         "source_page": url,
@@ -570,7 +563,9 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
 
 def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=100, verbose=True, log=None, model="local",
-                      proxy_enabled=False, proxy_url="http://127.0.0.1:2080"):
+                      proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
+                      top_n=20, images_count=10, llm_sources=10, max_variants=6, max_imgs_per_page=5,
+                      search_count=100):
     """Execute full deep research pipeline.
 
     Args:
@@ -618,8 +613,8 @@ def run_deep_research(query, server_url="http://localhost:8888",
     seen_urls = set()
     variants = _query_variants(enriched_query, query_type)
 
-    for i, q in enumerate(variants[:6]):
-        r = ddg_search.web_search(q, count=50, region="wt-wt", safe="auto")
+    for i, q in enumerate(variants[:max_variants]):
+        r = ddg_search.web_search(q, count=search_count, region="wt-wt", safe="auto")
         variant_urls = []
         if r:
             new = 0
@@ -695,6 +690,15 @@ def run_deep_research(query, server_url="http://localhost:8888",
     timings["validate"] = round(time.time() - t, 1)
     log(f"  Alive: {alive_count}/{min(len(all_results), max_validate)} ({timings['validate']}s)")
 
+    # Collect images from validation HTML (visual queries only)
+    page_images = []
+    if query_type == "visual":
+        for p in validated:
+            for img_url in p.get("val_images", []):
+                page_images.append({"url": img_url, "source_page": p.get("url", ""), "source_title": p.get("title", ""), "from_validation": True})
+        if page_images:
+            log(f"  Validation images: {len(page_images)} from {len(validated)} pages")
+
     # Step 5: Rank by relevance
     validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
 
@@ -748,7 +752,8 @@ def run_deep_research(query, server_url="http://localhost:8888",
     validated.sort(key=lambda x: len(x.get("text", "")), reverse=True)
     log("Deep-reading & extracting images from pages...")
     t = time.time()
-    deep_pages, page_images = _deep_read_and_extract(validated, top_n=20, query=query, verbose=verbose, log=log, query_type=query_type)
+    deep_pages, deep_images = _deep_read_and_extract(validated, top_n=top_n, query=query, verbose=verbose, log=log, query_type=query_type, max_imgs_per_page=max_imgs_per_page)
+    page_images.extend(deep_images)
     timings["deep_read"] = round(time.time() - t, 1)
     log(f"  {len(deep_pages)} pages read, {len(page_images)} images extracted ({timings['deep_read']}s)")
 
@@ -782,7 +787,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
         log(f"  Images: {len(page_images)} raw → {len(images)} unique (filtered: {img_from_irrelevant} from irrelevant pages, {img_dedup} duplicates)")
         for img in images[:10]:
             log(f"    IMG: {img['url'][:80]} from {img['source'][:60]}")
-    images = images[:10]
+    images = images if images_count <= 0 else images[:images_count]
 
     # Step 9: Build evidence — only pages with actual content
     evidence = []
@@ -802,6 +807,11 @@ def run_deep_research(query, server_url="http://localhost:8888",
         # Skip if no content AND no images (for visual)
         if text_len < min_text_len and img_count < min_images:
             skipped_evidence.append(f"{url[:60]} (text={text_len} < {min_text_len}, imgs={img_count} < {min_images})")
+            continue
+
+        # Skip image URLs as evidence sources (not content pages)
+        if re.search(r'\.(jpg|jpeg|png|gif|webp|avif)(?:\?|$)', url, re.I):
+            skipped_evidence.append(f"{url[:60]} (image URL, not content)")
             continue
 
         snippet = p.get("snippet", "") or (text[:500] if text else "")
@@ -836,12 +846,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 log(f"    {s}")
 
     # Step 10: LLM synthesis (conclusions only, not full text)
+    evidence.sort(key=lambda x: x.get("relevance", 0), reverse=True)
     log("Synthesizing conclusions...")
     t = time.time()
 
     # Give LLM the evidence content for synthesis
     evidence_content = ""
-    for i, e in enumerate(evidence[:10]):
+    for i, e in enumerate(evidence[:llm_sources]):
         content_preview = e['content'][:1500] if e['content'] else ""
         evidence_content += f"\n--- Source {i+1}: {e['title']} ---\n{content_preview}\n"
 
@@ -914,8 +925,9 @@ def _build_report(query, query_type, evidence, images, synthesis, timings):
     # Images
     if images:
         parts.append("## Images\n")
-        for img in images[:12]:
-            parts.append(f"![{img.get('title', 'image')}]({img['url']})")
+        for img in images:
+            img_url = img['url'].replace(' ', '%20')
+            parts.append(f"![{img.get('title', 'image')}]({img_url})")
         parts.append("")
 
     # LLM synthesis

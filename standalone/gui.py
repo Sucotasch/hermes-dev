@@ -265,7 +265,9 @@ class ResearchThread(QThread):
     error = pyqtSignal(str)           # error message
 
     def __init__(self, query, server_url, max_validate, output_dir, model="local",
-                 proxy_enabled=False, proxy_url="http://127.0.0.1:2080"):
+                 proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
+                 top_n=20, images_count=10, llm_sources=10, max_variants=6, max_imgs_per_page=5,
+                 search_count=100):
         super().__init__()
         self.query = query
         self.server_url = server_url
@@ -274,6 +276,12 @@ class ResearchThread(QThread):
         self.model = model
         self.proxy_enabled = proxy_enabled
         self.proxy_url = proxy_url
+        self.top_n = top_n
+        self.images_count = images_count
+        self.llm_sources = llm_sources
+        self.max_variants = max_variants
+        self.max_imgs_per_page = max_imgs_per_page
+        self.search_count = search_count
         self._cancelled = False
 
     def run(self):
@@ -297,6 +305,12 @@ class ResearchThread(QThread):
                 model=self.model,
                 proxy_enabled=self.proxy_enabled,
                 proxy_url=self.proxy_url,
+                top_n=self.top_n,
+                images_count=self.images_count,
+                llm_sources=self.llm_sources,
+                max_variants=self.max_variants,
+                max_imgs_per_page=self.max_imgs_per_page,
+                search_count=self.search_count,
             )
 
             if self._cancelled:
@@ -414,6 +428,67 @@ class HermesGUI(QMainWindow):
         row2.addWidget(self.spin_validate)
         sa_lay.addLayout(row2)
 
+        self._updating_validate = False
+
+        row_depth = QHBoxLayout()
+        row_depth.addWidget(QLabel("Deep-read:"))
+        self.spin_top_n = QSpinBox()
+        self.spin_top_n.setRange(5, 50)
+        self.spin_top_n.setValue(20)
+        self.spin_top_n.setMinimumWidth(60)
+        self.spin_top_n.valueChanged.connect(self._on_depth_changed)
+        row_depth.addWidget(self.spin_top_n)
+
+        row_depth.addWidget(QLabel("Report src:"))
+        self.spin_images = QSpinBox()
+        self.spin_images.setRange(0, 200)
+        self.spin_images.setValue(10)
+        self.spin_images.setSpecialValueText("0=all")
+        self.spin_images.setToolTip("Max sources/images in report (0 = all collected)")
+        self.spin_images.setMinimumWidth(60)
+        row_depth.addWidget(self.spin_images)
+
+        row_depth.addWidget(QLabel("LLM src:"))
+        self.spin_llm_src = QSpinBox()
+        self.spin_llm_src.setRange(3, 30)
+        self.spin_llm_src.setValue(10)
+        self.spin_llm_src.setToolTip("Sources for LLM synthesis (separate from report)")
+        self.spin_llm_src.setMinimumWidth(60)
+        self.spin_llm_src.valueChanged.connect(self._on_depth_changed)
+        row_depth.addWidget(self.spin_llm_src)
+
+        row_depth.addWidget(QLabel("Variants:"))
+        self.spin_variants = QSpinBox()
+        self.spin_variants.setRange(1, 10)
+        self.spin_variants.setValue(6)
+        self.spin_variants.setMinimumWidth(60)
+        row_depth.addWidget(self.spin_variants)
+
+        row_depth.addWidget(QLabel("Search:"))
+        self.spin_search_count = QSpinBox()
+        self.spin_search_count.setRange(10, 200)
+        self.spin_search_count.setValue(100)
+        self.spin_search_count.setToolTip("Max URLs per search query variant")
+        self.spin_search_count.setMinimumWidth(60)
+        row_depth.addWidget(self.spin_search_count)
+
+        row_depth.addWidget(QLabel("Page imgs:"))
+        self.spin_max_imgs = QSpinBox()
+        self.spin_max_imgs.setRange(0, 200)
+        self.spin_max_imgs.setValue(5)
+        self.spin_max_imgs.setSpecialValueText("0=all")
+        self.spin_max_imgs.setToolTip("Max images extracted per page (0 = all)")
+        self.spin_max_imgs.setMinimumWidth(60)
+        row_depth.addWidget(self.spin_max_imgs)
+
+        btn_reset = QPushButton("Reset")
+        btn_reset.setToolTip("Reset pipeline parameters to defaults")
+        btn_reset.setMaximumWidth(60)
+        btn_reset.clicked.connect(self._on_reset_params)
+        row_depth.addWidget(btn_reset)
+
+        sa_lay.addLayout(row_depth)
+
         row_proxy = QHBoxLayout()
         self.chk_proxy = QCheckBox("Proxy")
         self.chk_proxy.setChecked(True)
@@ -523,6 +598,26 @@ class HermesGUI(QMainWindow):
         self.cmb_model.clear()
         self.cmb_model.addItem("local")
 
+    def _on_depth_changed(self):
+        """Auto-raise Validate when Deep-read or LLM sources exceeds it."""
+        if self._updating_validate:
+            return
+        needed = max(self.spin_top_n.value(), self.spin_llm_src.value())
+        if needed > self.spin_validate.value():
+            self._updating_validate = True
+            self.spin_validate.setValue(needed)
+            self._updating_validate = False
+
+    def _on_reset_params(self):
+        """Reset pipeline parameters to defaults."""
+        self.spin_validate.setValue(100)
+        self.spin_top_n.setValue(20)
+        self.spin_images.setValue(10)
+        self.spin_llm_src.setValue(10)
+        self.spin_variants.setValue(6)
+        self.spin_search_count.setValue(100)
+        self.spin_max_imgs.setValue(5)
+
     def _on_proxy_changed(self):
         """Save proxy settings to ~/.hermes/proxy.env for Hermes mode."""
         from pathlib import Path
@@ -624,6 +719,12 @@ class HermesGUI(QMainWindow):
             model=model,
             proxy_enabled=proxy_enabled,
             proxy_url=proxy_url,
+            top_n=self.spin_top_n.value(),
+            images_count=self.spin_images.value(),
+            llm_sources=self.spin_llm_src.value(),
+            max_variants=self.spin_variants.value(),
+            max_imgs_per_page=self.spin_max_imgs.value(),
+            search_count=self.spin_search_count.value(),
         )
         self._research_thread.progress.connect(self._on_progress)
         self._research_thread.log_line.connect(self._on_log_line)
