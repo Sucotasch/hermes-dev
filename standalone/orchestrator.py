@@ -1000,7 +1000,7 @@ CRITICAL RULES:
 
     # Step 11: Build final report (articles + images + synthesis)
     log("Building report...")
-    report = _build_report(query, query_type, evidence, images, synthesis, timings)
+    report = _build_report(query, query_type, evidence, images, synthesis, timings, validated)
 
     total_time = round(time.time() - start_total, 1)
     log(f"\nTotal: {total_time}s")
@@ -1024,7 +1024,7 @@ CRITICAL RULES:
     }
 
 
-def _build_report(query, query_type, evidence, images, synthesis, timings):
+def _build_report(query, query_type, evidence, images, synthesis, timings, validated=None):
     """Build report: articles + images + LLM synthesis."""
     from datetime import datetime
 
@@ -1051,6 +1051,19 @@ def _build_report(query, query_type, evidence, images, synthesis, timings):
             img_url = img['url'].replace(' ', '%20')
             parts.append(f"![{img.get('title', 'image')}]({img_url})")
         parts.append("")
+
+    # Gallery links for visual queries (manual access to galleries)
+    if query_type == "visual" and validated:
+        gallery_pages = [p for p in validated if p.get("url") and p.get("img_count", 0) >= 5]
+        if gallery_pages:
+            parts.append("## Gallery Links\n")
+            parts.append("Pages with image galleries (click to open manually):\n")
+            for p in gallery_pages[:30]:
+                url = p.get("url", "")
+                title = p.get("title", url[:60])
+                img_count = p.get("img_count", 0)
+                parts.append(f"- [{title}]({url}) ({img_count} images)")
+            parts.append("")
 
     # LLM synthesis
     parts.append("## Analysis & Conclusions\n")
