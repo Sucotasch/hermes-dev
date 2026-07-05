@@ -1058,7 +1058,7 @@ def _build_report(query, query_type, evidence, images, synthesis, timings, valid
         if gallery_pages:
             parts.append("## Gallery Links\n")
             parts.append("Pages with image galleries (click to open manually):\n")
-            for p in gallery_pages[:30]:
+            for p in gallery_pages:
                 url = p.get("url", "")
                 title = p.get("title", url[:60])
                 img_count = p.get("img_count", 0)
