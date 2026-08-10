@@ -192,6 +192,16 @@ _PLATFORM_DOMAINS = {
     "forumhouse.ru", "pikabu.ru",
 }
 
+# Utility/system path tokens never worth expanding into (Level-2 candidates):
+# report-abuse, login/register, privacy/terms, feeds, etc.
+_UTILITY_TOKENS = {
+    "about", "contact", "privacy", "terms", "dmca", "sitemap", "faq",
+    "help", "support", "login", "signin", "signup", "register", "forgot",
+    "password", "account", "settings", "advertise", "press", "careers",
+    "report", "abuse", "cookie", "cookies", "newsletter", "disclaimer",
+    "license", "api", "rss", "feed", "status", "uptime",
+}
+
 # Mirror domains: same content on different TLDs
 _MIRROR_DOMAINS = {
     "bunkr.fi": "bunkr",
@@ -770,10 +780,10 @@ def run_deep_research(query, server_url="http://localhost:8888",
     # Apply proxy settings to both backend modules
     ddg_search.USE_PROXY = proxy_enabled
     ddg_search.PROXY_URL = proxy_url if proxy_enabled else None
-    ddg_search._sessions.clear()
+    ddg_search._reset_sessions()
     vwe.USE_PROXY = proxy_enabled
     vwe.PROXY_URL = proxy_url if proxy_enabled else None
-    vwe._sessions.clear()
+    vwe._reset_sessions()
     if log is None:
         log = lambda msg: print(f"  {msg}", flush=True) if verbose else None
     timings = {}
@@ -914,6 +924,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
         log("Level 2 expansion...")
         t = time.time()
         top_urls = [p["url"] for p in validated[:10] if p.get("url")]
+        # Pre-filter candidates by dedup key BEFORE validation: cap at 2 pages
+        # per registrable domain so one host (xxgasm case: 15/16 alive links)
+        # cannot consume the whole Level-2 budget.
+        key_counts = {}
+        for p in validated:
+            key = _dedup_key(p.get("url", ""))
+            key_counts[key] = key_counts.get(key, 0) + 1
         level2_urls = []
         for url in top_urls:
             try:
@@ -934,6 +951,20 @@ def run_deep_research(query, server_url="http://localhost:8888",
                                 continue
                         except Exception:
                             pass
+                        # Skip utility/homepage-ish links (report-abuse, login,
+                        # feeds, contact…): token-based, no substring risk.
+                        try:
+                            lpath = urlparse(href).path.strip("/").lower()
+                            path_tokens = re.split(r"[^a-z0-9]+", lpath)
+                            if lpath in _HOMEPAGE_PATHS or any(t in _UTILITY_TOKENS for t in path_tokens):
+                                continue
+                        except Exception:
+                            pass
+                        # Dedup-key cap before enqueueing (2 per registrable domain)
+                        key = _dedup_key(href)
+                        if key_counts.get(key, 0) >= 2:
+                            continue
+                        key_counts[key] = key_counts.get(key, 0) + 1
                         seen_urls.add(href)
                         level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
             except Exception:

@@ -51,7 +51,9 @@ one word from this list: person, visual, technical, news, historical, comparison
 fact, art, education, science, video, general.
 
 - person: biography, career, filmography, aliases, personal life of a specific person
-- visual: images, photos, galleries, portraits, design, wallpapers
+- visual: ANY query about finding/viewing images of something — photos, pics,
+  pictures, image gallery, wallpapers, portraits, design. If the query mentions
+  gallery/image(s)/pic(s)/photo(s)/wallpaper, prefer visual
 - technical: code, API, config, error, architecture, documentation, github, download
 - news: recent events, current affairs, breaking news
 - historical: history of events, origins, timeline, evolution of phenomena
@@ -110,44 +112,3 @@ Be specific: only add names you are confident about. Do not fabricate."""
         return response.strip()
     return query
 
-
-def synthesize_answer(query, evidence, query_type="general",
-                      server_url="http://localhost:8888", model="local"):
-    """Synthesize a final answer from evidence pack.
-
-    Args:
-        query: original user query
-        evidence: compact evidence list (from _compact_evidence)
-        query_type: intent label
-        server_url: llama.cpp server URL
-
-    Returns:
-        Markdown string with the synthesized answer.
-    """
-    evidence_text = "\n".join(
-        f"[{i+1}] {e.get('title', '')} ({e.get('relevance', 0):.0%})\n"
-        f"    {e.get('summary', '')}\n"
-        f"    URL: {e.get('url', '')}"
-        for i, e in enumerate(evidence[:15])
-    )
-
-    system = f"""You are a deep research assistant. Synthesize a comprehensive answer
-from the provided evidence pack. Query type: {query_type}.
-
-Rules:
-- Start with the answer, not the process
-- Use inline citations [N] referencing evidence numbers
-- Write in the same language as the query
-- For every claim, cite the source with [N]
-- Be factual: if evidence is insufficient, say so
-- For person topics: include birth date, career timeline, aliases, key works
-- For visual topics: mention image sources if available
-- Format as clean Markdown with headers
-- In the Sources section, format each source as: [N] [Title](URL) — one-line summary"""
-
-    response = chat_completion([
-        {"role": "system", "content": system},
-        {"role": "user", "content": f"Query: {query}\n\nEvidence:\n{evidence_text}"},
-    ], server_url=server_url, temperature=0.3, max_tokens=3000, model=model)
-
-    return response or "_Error: LLM synthesis failed_"

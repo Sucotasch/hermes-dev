@@ -19,7 +19,12 @@ function Stop-HermesIfRunning {
         return
     }
     Log 'Attempting to stop Hermes process...'
-    $procs = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'hermes|python|node' }
+    # Scope tightly: only hermes-named processes, or python/node whose
+    # command line references hermes. Never kill unrelated python/node work.
+    $procs = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -match 'hermes|gui_launcher' -or
+        (($_.Name -match '^python|^node') -and $_.CommandLine -match 'hermes')
+    }
     if ($procs) {
         foreach ($p in $procs | Select-Object -First 5) {
             Log "Found process: $($p.Name) (PID $($p.ProcessId))"

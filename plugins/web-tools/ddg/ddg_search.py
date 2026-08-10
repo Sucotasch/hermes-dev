@@ -15,6 +15,7 @@ Improvements over v2:
 import importlib.util
 import json, re, sys, time, random, os, urllib.parse
 import html as _html
+import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
@@ -56,6 +57,9 @@ _CONFIGURED_PROXY = (
 )
 USE_PROXY = bool(_CONFIGURED_PROXY)
 PROXY_URL = _CONFIGURED_PROXY
+# TLS verification: disabled by default (preserves legacy behavior; some local
+# tunnellers MITM). Set DDG_TLS_VERIFY=1 to enforce certificate checks.
+_TLS_VERIFY = os.environ.get("DDG_TLS_VERIFY", "0") == "1"
 JINA_URL = "https://r.jina.ai/"
 MAX_CHARS = 8000
 
@@ -89,30 +93,43 @@ def _random_ua():
     return random.choice(UA_POOL)
 
 # ── curl_cffi Session ───────────────────────────────────────────────────────
-# One session per domain for cookie persistence
-_sessions = {}
+# One session per impersonation fingerprint, PER THREAD. curl_cffi Sessions are
+# NOT thread-safe, and validation fans HEAD/GET out over a ThreadPoolExecutor —
+# a shared session was corrupted by concurrent requests (interleaved reads,
+# random TLS errors). Thread-local storage isolates them at zero coordination
+# cost. Cookies persist per thread for the whole run (same as before).
+_session_local = threading.local()
+
 
 def _get_session(domain=None):
-    """Get or create a curl_cffi Session with rotating Chrome fingerprint.
+    """Get or create a per-thread curl_cffi Session with rotating fingerprint.
     Main session always uses direct connection. Proxy is only used for retry."""
     import curl_cffi
 
     # Rotate impersonation to vary TLS fingerprint across sessions
     imp = random.choice(IMPERSONATE_POOL)
+    sessions = getattr(_session_local, "sessions", None)
+    if sessions is None:
+        sessions = _session_local.sessions = {}
     # Key by impersonate only (no proxy — main session is always direct)
     key = imp
-    if key not in _sessions:
+    if key not in sessions:
         try:
             sess = curl_cffi.requests.Session(
-                 impersonate=imp,
-                 verify=False,
-                 timeout=15,
-             )
-            _sessions[key] = sess
+                impersonate=imp,
+                verify=_TLS_VERIFY,
+                timeout=15,
+            )
+            sessions[key] = sess
         except Exception as e:
             print(f"[ddg-search] curl_cffi Session error: {e}", file=sys.stderr)
             return None
-    return _sessions[key]
+    return sessions[key]
+
+
+def _reset_sessions():
+    """Drop cached per-thread sessions (run start: avoid stale cookies)."""
+    _session_local.sessions = {}
 
 def _fetch(url, mode="document", referrer=None):
     """
@@ -1694,7 +1711,7 @@ def _check_url_live(url, timeout=10):
             ps = curl_cffi.requests.Session(
                 impersonate=random.choice(IMPERSONATE_POOL),
                 proxies={"http": PROXY_URL, "https": PROXY_URL},
-                verify=False, timeout=timeout,
+                verify=_TLS_VERIFY, timeout=timeout,
             )
             resp = getattr(ps, method)(url, timeout=timeout, allow_redirects=True)
             if resp.status_code < 400:

@@ -12,17 +12,38 @@ Improvements over v2:
   ✅ httpx fallback — HTTP/2 fallback
 """
 
-import json, re, sys, time, random, urllib.parse
+import json, re, sys, time, random, os, urllib.parse
 import html as _html
+import threading
 from bs4 import BeautifulSoup
 
 # curl_cffi imported lazily in _get_session to avoid circular import issues
 
 # ── Config ──────────────────────────────────────────────────────────────────
-# Proxy is optional. Set USE_PROXY=False to avoid depending on a local tunneller;
-# when enabled, PROXY_URL must point to a reachable HTTP CONNECT proxy.
-USE_PROXY = False
-PROXY_URL = "http://127.0.0.1:2080"
+# Proxy resolution mirrors ddg_search (DDG_PROXY env → HTTPS_PROXY/HTTP_PROXY →
+# ~/.hermes/proxy.env) so both modules share one default. Orchestrator still
+# overrides these per run.
+def _read_proxy_config():
+    try:
+        env = (os.environ.get("DDG_PROXY")
+               or os.environ.get("HTTPS_PROXY")
+               or os.environ.get("HTTP_PROXY"))
+        if env:
+            return True, env
+        pf = os.path.join(os.path.expanduser("~"), ".hermes", "proxy.env")
+        if os.path.exists(pf):
+            content = open(pf, "r", encoding="utf-8").read().strip()
+            if content and not content.startswith("#"):
+                return True, content
+    except Exception:
+        pass
+    return False, "http://127.0.0.1:2080"
+
+
+USE_PROXY, PROXY_URL = _read_proxy_config()
+# TLS verification: disabled by default (preserves legacy behavior; some local
+# tunnellers MITM). Set DDG_TLS_VERIFY=1 to enforce certificate checks.
+_TLS_VERIFY = os.environ.get("DDG_TLS_VERIFY", "0") == "1"
 JINA_URL = "https://r.jina.ai/"
 MAX_CHARS = 8000
 
@@ -52,26 +73,37 @@ UA_POOL = [
 ]
 
 # ── curl_cffi Session ───────────────────────────────────────────────────────
-_sessions = {}
+# Per-thread sessions: curl_cffi Sessions are not thread-safe and the pipeline
+# fetches from multiple workers. See ddg_search for the same fix.
+_session_local = threading.local()
+
 
 def _get_session():
-    """Get or create a curl_cffi Session with rotating Chrome fingerprint.
+    """Get or create a per-thread curl_cffi Session with rotating fingerprint.
     Main session always uses direct connection. Proxy is only used for retry."""
     imp = random.choice(IMPERSONATE_POOL)
+    sessions = getattr(_session_local, "sessions", None)
+    if sessions is None:
+        sessions = _session_local.sessions = {}
     key = imp
-    if key not in _sessions:
+    if key not in sessions:
         try:
             import curl_cffi
             sess = curl_cffi.requests.Session(
                 impersonate=imp,
-                verify=False,
+                verify=_TLS_VERIFY,
                 timeout=25,
             )
-            _sessions[key] = sess
+            sessions[key] = sess
         except Exception as e:
             print(f"[visit] curl_cffi Session error: {e}", file=sys.stderr)
             return None
-    return _sessions[key]
+    return sessions[key]
+
+
+def _reset_sessions():
+    """Drop cached per-thread sessions (run start: avoid stale cookies)."""
+    _session_local.sessions = {}
 
 # ── Fetch with curl_cffi ───────────────────────────────────────────────────
 def _fetch(url, referrer=None, cookies=None):
@@ -146,7 +178,7 @@ def _fetch(url, referrer=None, cookies=None):
                 proxy_session = curl_cffi.requests.Session(
                     impersonate=random.choice(IMPERSONATE_POOL),
                     proxies={"http": PROXY_URL, "https": PROXY_URL},
-                    verify=False, timeout=25,
+                    verify=_TLS_VERIFY, timeout=25,
                 )
                 extra_headers["User-Agent"] = random.choice(UA_POOL)
                 proxy_resp = proxy_session.get(url, headers=extra_headers, allow_redirects=True)
