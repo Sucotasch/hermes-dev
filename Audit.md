@@ -747,9 +747,89 @@ Validation results:
 - pytest: **22/22 passed** (`test_query_variants`, `test_check_url_live`, `test_scoring`, `test_coverage_gate`).
 - Network smoke (`test_quick.py`): 3/3 real URLs correctly classified alive.
 
-Remaining open items (from §11 / §8, not fixed — need decisions):
+---
+
+## 14. Integration analysis: web-media-parser → deep-research pipeline (2026-08-10)
+
+Source: `Temp/web-media-parser/` (media crawler + browser extension, tested & working).
+Verified against actual code, not docs. Goal: port **proven** full-size-image discovery and
+URL-hygiene logic into `plugins/web-tools/ddg/` + `standalone/` + Hermes wrapper.
+
+### 14.1 What the crawler has that we don't
+
+| Capability | Where (web-media-parser) | Current project equivalent | Gap |
+|---|---|---|---|
+| **Imagus Sieve rules** (823-849 regex+JS rules thumbnail→fullsize) | `site_pattern_manager.py::transform_image_url` + `Imagus_sieve_*.json` | `upgrade_to_fullsize()` (ddg_search.py:1263, visit_website_enhanced.py:438) — ~10 hand-written heuristics | **Biggest win**: 800+ curated site rules vs 10 heuristics |
+| **JS rule→Python converter** | `_try_parse_imagus_js` / `_build_js_callable` (pure Python, no Deno) | none | ~40% of sieve JS rules convertible without Deno; rest fail-open |
+| **link→url→res fullsize discovery** (thumbnail→linked page→original, e.g. imx.to) | `get_link_rule`+`apply_link_url_transform`+`extract_res_urls`; `parser_manager._discover_linked_fullsize` (concurrency-bounded, time-budgeted) | none | Visual queries lose external image-host originals |
+| **#ext# variant expansion** (image.#jpg png# → 2 URLs) | `_expand_variants` | none | Sieve targets often emit multi-variant output |
+| **WordPress size-suffix strip** (`-300x200.jpg`→`.jpg`) | `transform_image_url` step 4 | `upgrade_to_fullsize` step 1 (same regex) | ✅ already present |
+| **Precision-first junk filter** (ad/tracker hosts dot-boundary + path tokens + allowlist + weak signals) | `junk_filter.py` (pure Python, 240 LOC, tested 30+ cases) | `BLOCKED_DOMAINS` substring set + dead `VISUAL_ALLOWLIST` (P1-16) | Replace/augment with tested classifier |
+| **Fullsize data-attribute priority** (`data-hi-res-src`, `data-fullsize`, `data-maxres`, `data-retina`…) | `webpage_parser._get_best_image_url` (15+ attrs, priority scoring, srcset w/x) | `extract_fullsize_images` regex already lists most attrs, but no priority order / x-density | Small: prefer hi-res attr when several present |
+| **`normalize_url`** (strip utm/fbclid/gclid, sort query, collapse repeated path segments) | `utils.py::normalize_url` (tested) | `orchestrator._dedup_key` (strips only `?m=`) + wrapper `seen_page` (raw) | Better dedup; also collapses `threads/threads/threads` bloat |
+| **429 Retry-After backoff** (seconds or HTTP-date) | `webpage_parser._get_content` | `_check_url_live` treats 429 as hard fail | Small, real perf/coverage win |
+| **Binary-media guard** (Content-Type image/video → skip HTML parse) | `webpage_parser._get_content` | `_check_url_live` fetches full body | Avoids parsing megabytes of binary |
+| **Consent-cookie static extraction** (from onclick JS, incl. inline fn bodies) | `_extract_consent_cookies_from_js` / `_find_inline_function_body` | `_strip_block_overlay` (removes overlay markup only) | Partial win for age-gated sites |
+| **Bot-trap / hidden-element defense** | `_is_element_visible` | none in image extraction | Optional |
+| **Priority URL queue** (media ×25, path similarity, same-gallery child/sibling) | `priority_url_queue.py` | linear pipeline, no site crawling | **Not applicable** — we don't crawl site trees |
+| **Deno JS engine** (happy-dom workers) | `js_engine/` | none | **Not applicable** — external binary, fail-open only; keep Python converter path |
+| aiohttp stack / downloader / GUI / task queue | `http_engine`, `media_downloader`, `gui/` | curl_cffi/httpx sync stack | **Not applicable** — different architecture |
+
+### 14.2 Recommended integration plan (priority order)
+
+**INT-1. Imagus Sieve static engine (high value, low risk, network-free)**
+- Port a **slim `sieve.py`** into `plugins/web-tools/ddg/` containing: sieve JSON loading (domain-indexed +
+  global rules), `img`+`to` regex substitution (`$n`→`\g<n>`), the JS→Python callable converter
+  (no Deno), `#ext#` expansion, WordPress strip, dedup. ~250 lines, copied from `site_pattern_manager.py`.
+- Ship `Imagus_sieve_2026.07.15_823.json` (920 KB) as `plugins/web-tools/ddg/resources/` and load lazily.
+- Wire into `upgrade_to_fullsize()` (both copies) as a final `sieve.apply(url, source_url)` step returning
+  the first transformed candidate, and into `extract_fullsize_images` output list. Keep old heuristics as fallback.
+- `restore.ps1` must copy the JSON + module to `~/.hermes/`.
+- Risk: low (fail-open — no rules → return url unchanged). Perf: index by domain, compile once.
+
+**INT-2. Junk filter (high value, low risk)**
+- Copy `junk_filter.py` (or a trimmed variant) into `plugins/web-tools/ddg/`.
+- Use `is_ad_url()` in `_should_filter_url` (ddg_search.py:1828) and in `_filter_images_for_report`
+  (skip ad-host images); use `should_skip_junk_url()` for Level-2 expansion candidates.
+- Replace dead `VISUAL_ALLOWLIST` mechanism (P1-16) with the allowlist file approach.
+- Ship `junk_allowlist.txt`; `restore.ps1` copies it.
+
+**INT-3. link→url→res fullsize discovery for visual queries (medium value, medium risk)**
+- Add `get_link_rule`/`apply_link_url_transform`/`extract_res_urls` (from `site_pattern_manager.py`)
+  into the sieve module; implement a sync `discover_fullsize(thumb_url, page_url)` using the existing
+  curl_cffi `_fetch`, bounded by a per-run time budget (pattern: `FULLSIZE_DISCOVER_CONCURRENCY`/
+  `_TIME_BUDGET`).
+- Call it from `_deep_read_and_extract` only for `query_type == "visual"` when an extracted image URL
+  is a thumbnail whose page context is known.
+- Risk: medium — extra network calls; mitigation: budget + only for visual, only when sieve has a
+  matching `link` rule (no rule → skip instantly).
+
+**INT-4. `normalize_url` + Retry-After + binary guard (small, safe)**
+- Port `normalize_url` into `_common.py`; use for dedup in orchestrator/wrapper.
+- In `_check_url_live`: parse `Retry-After` on 429 (sleep+retry once), and short-circuit binary
+  Content-Type (don't GET body / don't text-scan binary).
+
+**INT-5. Fullsize data-attribute priority + consent-cookie extraction (small)**
+- In `extract_fullsize_images`, when several data-* candidates exist for the same image, prefer
+  hi-res attrs (`data-hi-res-src`/`data-full`/`data-maxres`/`data-original` over `data-src`).
+- Optionally port `_extract_consent_cookies_from_js` into `_fetch` (ddg_search) as a last-resort
+  retry for age-gated pages.
+
+**INT-6. NOT recommended** (documented for awareness): priority URL queue, Deno engine, aiohttp
+stack, downloader/GUI — different architecture; porting costs exceed value for a search pipeline.
+
+### 14.3 Decisions needed from the user
+1. Which INT items to implement (1-5 above), and in which batch order.
+2. INT-1: use the newest sieve file (2026.07.15, 823 rules) as the shipped default?
+3. INT-3: OK to add extra network fetches for visual queries only?
+
+---
+
+### 14.4 Remaining open items (from §11 / §8 / §14)
+
 - `search_deep` results now sorted by relevance (NEW-7 fixed); report evidence size cap (NEW-8) — product call, not changed.
 - Standardize `_relevance_score` vs `content_relevance_score` (NEW-10).
 - Unify proxy defaults across modules (NEW-13).
 - Dead code cleanup (P1-15: unused `_search_*` strategies, `fetch_page`, `compose.py`, `synthesize_answer`, `VISUAL_ALLOWLIST`).
 - Thread-safety of shared curl_cffi sessions (P1-23), `verify=False` (P4), restore.ps1 process killing (P4).
+- Integration items INT-1..INT-5 from §14 (pending user decision).

@@ -435,7 +435,7 @@ def extract_js_data(html):
 _TRACKING_IMG_RE = re.compile(r'(?:pixel|track|1x1|spacer|blank|clear\.gif|analytics|badge|doubleclick|gstatic)', re.I)
 
 
-def upgrade_to_fullsize(url):
+def upgrade_to_fullsize(url, source_url=""):
     """Try common patterns to upgrade a thumbnail URL to full-size."""
     if not url:
         return url
@@ -467,6 +467,16 @@ def upgrade_to_fullsize(url):
     # Site-specific: Flickr (_q → _o for original)
     if 'staticflickr.com' in url or 'live.staticflickr.com' in url:
         url = re.sub(r'_(?:q|sq|t|s|m|n)(\.(?:jpg|jpeg|png))$', r'_o\1', url)
+
+    # Imagus sieve rules (fail-open, domain-precise). Applied last — heuristic
+    # steps above are only a fallback when no sieve rule matches.
+    try:
+        from sieve import apply as _sieve_apply
+        sieved = _sieve_apply(url, source_url or url)
+        if sieved and sieved != url:
+            url = sieved
+    except Exception:
+        pass
 
     return url if url != original else original
 
@@ -502,7 +512,15 @@ def extract_fullsize_images(html, base_url=""):
         if best_url:
             urls.append(best_url)
 
-    for m in re.finditer(r'data-(?:src|original|lazy-src|full-src|hi-res-src|bg|poster|image|srcset|load|source|lazy|high-res|hires|retina|full|fullsize|fullsizeurl|max-res|maxres)="([^"]+)"', html, re.I):
+    # data-* lazy-load attributes. Hi-res attrs (data-hi-res-src, data-fullsize,
+    # data-maxres, data-original, …) are appended first so they win the later
+    # dedup (dedup keeps the first occurrence).
+    _DATA_ATTR_RE = r'data-(?:src|original|lazy-src|full-src|hi-res-src|bg|poster|image|srcset|load|source|lazy|high-res|hires|retina|full|fullsize|fullsizeurl|max-res|maxres)="([^"]+)"'
+    _HIRES_HINTS = ('hi-res', 'high-res', 'hires', 'fullsize', 'full-src',
+                    'max-res', 'maxres', 'original', 'retina')
+    data_matches = list(re.finditer(_DATA_ATTR_RE, html, re.I))
+    data_matches.sort(key=lambda m: 0 if any(h in m.group(0).lower() for h in _HIRES_HINTS) else 1)
+    for m in data_matches:
         urls.append(m.group(1))
 
     # Framework-specific: v-lazy (Vue), [lazyLoad] (Angular), ng-src (AngularJS)
@@ -570,7 +588,7 @@ def extract_fullsize_images(html, base_url=""):
         # Filter trash media (icons, animated gifs, svg)
         if re.search(r'\.(?:gif|ico|svg|cur)(?:\?|$)', url, re.I):
             continue
-        url = upgrade_to_fullsize(url)
+        url = upgrade_to_fullsize(url, base_url)
         resolved.append(url)
 
     # Fallback: regular <img> tags with size hints (if few results so far)

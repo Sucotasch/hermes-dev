@@ -1260,7 +1260,7 @@ _TRACKING_IMG_RE2 = re.compile(r'(?:pixel|track|1x1|spacer|blank|clear\.gif|anal
 _FULLSIZE_IMG_MAX = 20
 
 
-def upgrade_to_fullsize(url):
+def upgrade_to_fullsize(url, source_url=""):
     """Try common patterns to upgrade a thumbnail URL to full-size.
 
     Handles: size suffixes, flickr tokens, path segments, CDN subdomains.
@@ -1307,6 +1307,17 @@ def upgrade_to_fullsize(url):
     if 'staticflickr.com' in url or 'live.staticflickr.com' in url:
         url = re.sub(r'_(?:q|sq|t|s|m|n)(\.(?:jpg|jpeg|png))$', r'_o\1', url)
 
+    # 10. Imagus sieve rules (fail-open, domain-precise). Applied last — the
+    #     sieve knows the exact fullsize URL for the host; heuristic steps
+    #     above are only a fallback when no rule matches.
+    try:
+        from sieve import apply as _sieve_apply
+        sieved = _sieve_apply(url, source_url or url)
+        if sieved and sieved != url:
+            url = sieved
+    except Exception:
+        pass
+
     return url if url != original else original
 
 
@@ -1351,8 +1362,16 @@ def extract_fullsize_images(html, base_url=""):
         if best_url:
             urls.append(best_url)
 
-    # 4. data-* lazy-load attributes (expanded set)
-    for m in re.finditer(r'data-(?:src|original|lazy-src|full-src|hi-res-src|bg|poster|image|srcset|load|source|lazy|high-res|hires|retina|full|fullsize|fullsizeurl|max-res|maxres)="([^"]+)"', html, re.I):
+    # 4. data-* lazy-load attributes (expanded set). When several data-*
+    #    attrs exist for the same image, hi-res ones (data-hi-res-src,
+    #    data-fullsize, data-maxres, data-original, …) must win the later
+    #    dedup — so they are appended first (dedup keeps the first occurrence).
+    _DATA_ATTR_RE = r'data-(?:src|original|lazy-src|full-src|hi-res-src|bg|poster|image|srcset|load|source|lazy|high-res|hires|retina|full|fullsize|fullsizeurl|max-res|maxres)="([^"]+)"'
+    _HIRES_HINTS = ('hi-res', 'high-res', 'hires', 'fullsize', 'full-src',
+                    'max-res', 'maxres', 'original', 'retina')
+    data_matches = list(re.finditer(_DATA_ATTR_RE, html, re.I))
+    data_matches.sort(key=lambda m: 0 if any(h in m.group(0).lower() for h in _HIRES_HINTS) else 1)
+    for m in data_matches:
         urls.append(m.group(1))
 
     # 5. Framework-specific: v-lazy (Vue), [lazyLoad] (Angular), ng-src (AngularJS)
@@ -1426,7 +1445,7 @@ def extract_fullsize_images(html, base_url=""):
         if re.search(r'\.(?:gif|ico|svg|cur)(?:\?|$)', url, re.I):
             continue
         # Upgrade thumbnail to full-size
-        url = upgrade_to_fullsize(url)
+        url = upgrade_to_fullsize(url, base_url)
         resolved.append(url)
 
     # Fallback: regular <img> tags with size hints (if few results so far)
@@ -1603,6 +1622,26 @@ def _tag_bot_challenge(items):
     return hits
 
 
+def _parse_retry_after(raw):
+    """Parse a Retry-After header (seconds or RFC 7231 HTTP-date) into seconds.
+
+    Returns None when unparseable (caller should not retry).
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        return max(0, int((parsedate_to_datetime(raw) - datetime.now(timezone.utc)).total_seconds()))
+    except Exception:
+        return None
+
+
 def _check_url_live(url, timeout=10):
     """Check if a URL is alive and accessible.
 
@@ -1689,6 +1728,30 @@ def _check_url_live(url, timeout=10):
     result["content_length"] = int(cl) if cl.isdigit() else 0
     status = result["status"]
 
+    # Binary-media guard: a "webpage" answering with an image/video/audio
+    # payload is not HTML (photo hosts 302 image URLs straight to a CDN).
+    # Do NOT download megabytes of binary just to fail the text scan.
+    ct = (result["content_type"] or "").lower()
+    if ct.startswith(("image/", "video/", "audio/")):
+        result["error"] = "binary media content, not HTML"
+        return result
+
+    # 429 Retry-After backoff (seconds or RFC 7231 HTTP-date), once per run.
+    if status == 429:
+        raw_ra = head_resp.headers.get("Retry-After", "")
+        retry_after = _parse_retry_after(raw_ra)
+        if retry_after is not None and retry_after <= timeout:
+            time.sleep(min(retry_after, 10))
+            try:
+                retry_resp = session.head(url, timeout=timeout, allow_redirects=True)
+                if retry_resp.status_code < 400:
+                    head_resp = retry_resp
+                    status = retry_resp.status_code
+                    result["status"] = status
+                    result["content_type"] = retry_resp.headers.get("content-type", "")[:200]
+            except Exception:
+                pass
+
     # Phase 2: hard statuses — proxy GET (actually delivers content), else blocked/dead
     if status in (403, 429, 451, 503):
         pr = _proxy_retry("get")
@@ -1732,6 +1795,13 @@ def _check_url_live(url, timeout=10):
     result["content_length"] = max(result["content_length"], int(cl2) if cl2.isdigit() else 0)
     if result["status"] >= 400:
         result["error"] = f"HTTP {result['status']}"
+        return result
+
+    # Binary-media guard on the GET response too (redirect may have landed on
+    # a CDN image): skip the HTML text scan for binary payloads.
+    get_ct = (result["content_type"] or "").lower()
+    if get_ct.startswith(("image/", "video/", "audio/")):
+        result["error"] = "binary media content, not HTML"
         return result
 
     raw = body_resp.text
@@ -1826,7 +1896,11 @@ def _is_video_url(url):
 
 
 def _should_filter_url(url, query_type=None):
-    """Drop homepages, search result pages, and (for non-video queries) video URLs."""
+    """Drop homepages, search result pages, and (for non-video queries) video URLs.
+
+    Also drops known ad/tracker/junk URLs via the precision-first junk filter
+    (allowlist-aware). Junk URL filtering never fires for allowed domains.
+    """
     try:
         parsed = urllib.parse.urlparse(url or "")
         path = parsed.path.strip("/").lower()
@@ -1837,6 +1911,13 @@ def _should_filter_url(url, query_type=None):
         return True
     if query_type != "video" and _is_video_url(url_lower):
         return True
+    # Ad/tracker hosts + junk transitions (forum chrome, login/register, etc.)
+    try:
+        from junk_filter import is_ad_url, should_skip_junk_url
+        if is_ad_url(url) or should_skip_junk_url(url):
+            return True
+    except Exception:
+        pass
     return False
 
 

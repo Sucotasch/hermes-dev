@@ -114,6 +114,11 @@ $Files = @(
     @{ Repo = 'plugins\web-tools\ddg\visit_website_enhanced.py'; Dest = 'plugins\web-tools\ddg\visit_website_enhanced.py' }
     @{ Repo = 'plugins\web-tools\ddg\query_variants.py'; Dest = 'plugins\web-tools\ddg\query_variants.py' }
     @{ Repo = 'plugins\web-tools\ddg\_coverage.py'; Dest = 'plugins\web-tools\ddg\_coverage.py' }
+    @{ Repo = 'plugins\web-tools\ddg\_common.py'; Dest = 'plugins\web-tools\ddg\_common.py' }
+    @{ Repo = 'plugins\web-tools\ddg\sieve.py'; Dest = 'plugins\web-tools\ddg\sieve.py' }
+    @{ Repo = 'plugins\web-tools\ddg\junk_filter.py'; Dest = 'plugins\web-tools\ddg\junk_filter.py' }
+    @{ Repo = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json'; Dest = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json' }
+    @{ Repo = 'plugins\web-tools\ddg\resources\junk_allowlist.txt'; Dest = 'plugins\web-tools\ddg\resources\junk_allowlist.txt' }
     @{ Repo = 'CONTEXT.md'; Dest = 'CONTEXT.md' }
     @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
     @{ Repo = 'skills\web-deep-search\SKILL.md'; Dest = 'skills\web-deep-search\SKILL.md' }
@@ -143,6 +148,9 @@ $HadFailure = $false
 $Targets = @(
     @('plugins\web-tools\ddg\ddg_search.py', $false),
     @('plugins\web-tools\ddg\visit_website_enhanced.py', $false),
+    @('plugins\web-tools\ddg\sieve.py', $false),
+    @('plugins\web-tools\ddg\junk_filter.py', $false),
+    @('plugins\web-tools\ddg\_common.py', $false),
     @('hermes-agent\tools\ddg_search_tool.py', $false)
 )
 foreach ($t in $Targets) {

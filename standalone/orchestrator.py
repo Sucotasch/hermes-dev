@@ -615,6 +615,15 @@ def _filter_images_for_report(images, log=None):
     SKIP_FORMATS = ('.gif', '.svg', '.ico', '.cur', '.bmp', '.tiff')
     MIN_WIDTH, MIN_HEIGHT = 600, 450
 
+    # Precision-first ad/tracker URL filter (allowlist-aware, fail-open):
+    # skip downloads of likely ad/pixel images entirely — saves requests and
+    # keeps ads out of the visual report.
+    try:
+        from junk_filter import is_ad_url
+        images = [img for img in images if not is_ad_url(img.get("url", ""))]
+    except Exception:
+        pass
+
     if Image is None:
         if log:
             log(f"    Image filter: skipped (Pillow not installed) — keeping {len(images)} images")
@@ -767,6 +776,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     seen_urls = set()
     variants = _query_variants(enriched_query, query_type)
 
+    from _common import normalize_url as _normalize_url
     for i, q in enumerate(variants[:max_variants]):
         r = ddg_search.web_search(q, count=search_count, region="wt-wt", safe="auto")
         variant_urls = []
@@ -774,9 +784,9 @@ def run_deep_research(query, server_url="http://localhost:8888",
             new = 0
             for item in r.get("results", []):
                 u = item.get("url", "")
-                # Normalize: strip mobile params (?m=0, ?m=1) for dedup
-                import re as _re
-                u_clean = _re.sub(r'\?m=\d+$', '', u)
+                # Normalize for dedup: strip tracking params (?m=0, utm_*,
+                # fbclid), drop fragment, collapse repeated path segments
+                u_clean = _normalize_url(u)
                 if u_clean and u_clean not in seen_urls:
                     seen_urls.add(u_clean)
                     all_results.append(item)
@@ -936,7 +946,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
         if img["source_page"] not in relevant_urls:
             img_from_irrelevant += 1
             continue
-        url = ddg_search.upgrade_to_fullsize(img["url"])
+        url = ddg_search.upgrade_to_fullsize(img["url"], img.get("source") or img.get("source_page") or "")
         if url in seen_imgs:
             img_dedup += 1
             continue

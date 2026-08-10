@@ -1,0 +1,3 @@
+# Domains that must never be classified as junk (one per line).
+# Users who deliberately scrape ad-served galleries add their host here.
+# Lines starting with '#' are ignored.
