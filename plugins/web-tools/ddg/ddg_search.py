@@ -1689,21 +1689,19 @@ def _check_url_live(url, timeout=10):
     result["content_length"] = int(cl) if cl.isdigit() else 0
     status = result["status"]
 
-    # Phase 2: hard statuses — proxy retry, else mark blocked/dead
+    # Phase 2: hard statuses — proxy GET (actually delivers content), else blocked/dead
     if status in (403, 429, 451, 503):
-        pr = _proxy_retry("get" if status == 503 else "head")
-        if pr:
+        pr = _proxy_retry("get")
+        if pr and pr[1] and not _detect_blocked(pr[1]) and _finalize(pr[1]):
             result["status"] = pr[0]
             result["proxy_used"] = True
-            if status == 503 and pr[1]:
-                # Proxy GET already returned the body — finalize directly
-                if not _detect_blocked(pr[1]) and _finalize(pr[1]):
-                    return result
-                result["blocked"] = True
-                result["error"] = "blocked (captcha/cloudflare/etc)"
-                return result
-            # 403/429/451 recovered via proxy HEAD → fall through to direct GET below
-        elif status == 503:
+            return result
+        if pr:
+            # Proxy reachable but still no usable content → genuinely blocked
+            result["blocked"] = True
+            result["error"] = "blocked (captcha/cloudflare/etc)"
+            return result
+        if status == 503:
             # Server may have recovered — one direct GET retry after a short delay
             try:
                 time.sleep(2)
@@ -1715,14 +1713,9 @@ def _check_url_live(url, timeout=10):
                         return result
             except Exception:
                 pass
-            result["blocked"] = True
-            result["error"] = f"HTTP {status}"
-            return result
-        else:
-            # Hard block, proxy failed or disabled → now marked blocked correctly
-            result["blocked"] = True
-            result["error"] = f"HTTP {status}"
-            return result
+        result["blocked"] = True
+        result["error"] = f"HTTP {status}"
+        return result
     elif status in (404, 405, 410, 500, 502, 504) or status >= 400:
         result["error"] = f"HTTP {status}"
         return result
@@ -2040,13 +2033,16 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
 
                 if not check['alive']:
                     dead_count += 1
-                    # Track domain failures for quarantine (only 403/captcha)
-                    if check.get('blocked') or (check.get('status') and check['status'] in (403, 429, 451)):
+                    status = check.get('status')
+                    reason = (check.get('error') or '').lower()
+                    # Defer temporarily-unavailable sites (503/timeout/DNS); quarantine hard blocks
+                    is_deferred = (status in (503, 504)) or ("timeout" in reason) or ("getaddrinfo" in reason)
+                    if not is_deferred and (check.get('blocked') or (status and status in (403, 429, 451))):
                         domain_fails[dom] = domain_fails.get(dom, 0) + 1
                         if domain_fails[dom] >= 2 and dom not in quarantined:
                             quarantined.add(dom)
                             quarantined_count += 1
-                    if check.get('blocked'):
+                    if check.get('blocked') and not is_deferred:
                         blocked_count += 1
                     res_out = dict(res)
                     res_out['alive'] = False

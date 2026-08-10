@@ -383,22 +383,29 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
             reason = check.get("error", "unknown")
             status = check.get("status")
             proxy_attempt = " (proxy failed)" if (ddg_search.USE_PROXY and not check.get("proxy_used")) else ""
-            # Blocked: 403/captcha after proxy → skip domain entirely
-            if check.get("blocked") or (status and status in (403, 429, 451)):
+            reason_l = reason.lower()
+            # Deferred first: 503/timeout/DNS → try again at the end of the run
+            is_deferred = (status in (503, 504)) or ("timeout" in reason_l) or ("getaddrinfo" in reason_l)
+            is_blocked = (check.get("blocked") or (status and status in (403, 429, 451))) and not is_deferred
+
+            if is_deferred:
+                if dom not in deferred_domains and dom not in blocked_domains:
+                    deferred_domains.add(dom)
+                    deferred_count += 1
+                    if log:
+                        log(f"    DEFER: {dom} (temporarily unavailable) — moving to end")
+                dead_count += 1
+                if status:
+                    http_errors[status] = http_errors.get(status, 0) + 1
+                if log:
+                    log(f"    DEAD HTTP {status}{proxy_attempt} (deferred) | {short_url}")
+            elif is_blocked:
                 domain_fails[dom] = domain_fails.get(dom, 0) + 1
                 if domain_fails[dom] >= 2 and dom not in blocked_domains:
                     blocked_domains.add(dom)
                     blocked_domains_count += 1
                     if log:
                         log(f"    BLOCK DOMAIN: {dom} ({domain_fails[dom]} blocks after proxy) — skipping all URLs")
-            # Deferred: 503/timeout after proxy → try at end of list
-            elif status in (503, 504) or "timeout" in reason.lower() or "getaddrinfo" in reason.lower():
-                if dom not in deferred_domains and dom not in blocked_domains:
-                    deferred_domains.add(dom)
-                    deferred_count += 1
-                    if log:
-                        log(f"    DEFER: {dom} (temporarily unavailable) — moving to end")
-            if check.get("blocked"):
                 blocked_count += 1
                 if log:
                     log(f"    BLOCKED {reason}{proxy_attempt} | {short_url}")
@@ -423,7 +430,7 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
         for item in batch:
             dom = _base_domain(urlparse(item.get("url", "")).hostname)
             if dom in blocked_domains:
-                blocked_domains_count += 1          # skip entirely — domain blocking us
+                continue                            # skip entirely — domain blocking us
             elif dom in deferred_domains:
                 pending.append(item)                # try again at the end
             else:
@@ -455,6 +462,9 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
         for item in deferred_pending:
             if alive_count >= max_validate:
                 break
+            dom = _base_domain(urlparse(item.get("url", "")).hostname)
+            if dom in blocked_domains:
+                continue  # domain got quarantined during the run — skip
             item, check = validate_one(item)
             _process_one(item, check)
 

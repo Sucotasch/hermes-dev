@@ -4,6 +4,7 @@ Locks in the retry-path fixes: hard 403/429/451/503 are marked blocked, the
 503 direct-GET retry is reachable, and DNS/timeout errors are reported as dead.
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,64 +45,60 @@ class _FakeSessionDnsFail:
         raise Exception("getaddrinfo failed for example.com")
 
 
-def _run(head, get=200, get_text=_LONG_HTML, dns_fail=False, no_sleep=False):
-    old_session, old_proxy, old_url = ddg_search._get_session, ddg_search.USE_PROXY, ddg_search.PROXY_URL
-    old_sleep = None
-    try:
-        ddg_search._get_session = (
-            lambda domain=None: _FakeSessionDnsFail() if dns_fail else _FakeSession(head=head, get=get, get_text=get_text)
-        )
-        ddg_search.USE_PROXY = False
-        ddg_search.PROXY_URL = None
-        if no_sleep:
-            old_sleep = ddg_search.time.sleep
-            ddg_search.time.sleep = lambda s: None  # patched for the 2s 503 retry delay
-        return ddg_search._check_url_live("https://example.com/page", timeout=3)
-    finally:
-        ddg_search._get_session = old_session
-        ddg_search.USE_PROXY = old_proxy
-        ddg_search.PROXY_URL = old_url
-        if old_sleep is not None:
-            ddg_search.time.sleep = old_sleep
+def _setup(monkeypatch, head=200, get=200, dns_fail=False, no_sleep=False):
+    monkeypatch.setattr(
+        ddg_search, "_get_session",
+        lambda domain=None: _FakeSessionDnsFail() if dns_fail else _FakeSession(head=head, get=get),
+    )
+    monkeypatch.setattr(ddg_search, "USE_PROXY", False)
+    monkeypatch.setattr(ddg_search, "PROXY_URL", None)
+    if no_sleep:
+        monkeypatch.setattr(time, "sleep", lambda s: None)  # avoid the real 2s 503 delay
 
 
-def test_200_alive():
-    r = _run(200, 200)
+def test_200_alive(monkeypatch):
+    _setup(monkeypatch, 200, 200)
+    r = ddg_search._check_url_live("https://example.com/page", timeout=3)
     assert r["alive"] is True
     assert r["status"] == 200
     assert r["text_length"] >= 500
 
 
-def test_404_dead():
-    r = _run(404)
+def test_404_dead(monkeypatch):
+    _setup(monkeypatch, 404)
+    r = ddg_search._check_url_live("https://example.com/page", timeout=3)
     assert r["alive"] is False
     assert r["blocked"] is False
     assert "404" in (r["error"] or "")
 
 
-def test_403_blocked_flag():
+def test_403_blocked_flag(monkeypatch):
     # Hard 403 without proxy must be marked blocked (previously blocked=False)
-    r = _run(403)
+    _setup(monkeypatch, 403)
+    r = ddg_search._check_url_live("https://example.com/page", timeout=3)
     assert r["alive"] is False
     assert r["blocked"] is True
     assert "403" in (r["error"] or "")
 
 
-def test_503_reaches_direct_retry():
+def test_503_reaches_direct_retry(monkeypatch):
     # 503 without proxy now attempts one direct GET retry (previously dead branch)
-    r = _run(503, get=503, no_sleep=True)
+    _setup(monkeypatch, 503, get=503, no_sleep=True)
+    r = ddg_search._check_url_live("https://example.com/page", timeout=3)
     assert r["alive"] is False
     assert r["blocked"] is True
 
 
-def test_503_recovers_on_retry():
+def test_503_recovers_on_retry(monkeypatch):
     # 503 on HEAD, but the direct GET retry succeeds → alive
-    r = _run(503, get=200, no_sleep=True)
+    _setup(monkeypatch, 503, get=200, no_sleep=True)
+    r = ddg_search._check_url_live("https://example.com/page", timeout=3)
     assert r["alive"] is True
     assert r["blocked"] is False
 
 
-def test_dns_error_dead():
-    r = _run(200, dns_fail=True)
+def test_dns_error_dead(monkeypatch):
+    _setup(monkeypatch, 200, dns_fail=True)
+    r = ddg_search._check_url_live("https://example.com/page", timeout=3)
     assert r["alive"] is False
     assert "getaddrinfo" in (r["error"] or "").lower()

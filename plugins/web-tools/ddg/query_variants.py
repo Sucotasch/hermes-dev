@@ -34,6 +34,10 @@ TYPE_SUFFIXES = {
         "vs alternative comparison", "pros cons advantages",
         "detailed analysis benchmark", "which is better",
     ],
+    "video": [
+        "video sources clips footage", "watch online stream full",
+        "video archive collection", "trailer official release",
+    ],
     "general": [
         "free", "image search", "examples", "best resources",
     ],
