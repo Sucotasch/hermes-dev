@@ -177,7 +177,7 @@ def _query_variants_wrapper(query, query_type="general"):
 
 
 def _compact_evidence(pages, max_per_page=1500):
-    """Compress evidence pack: first two paragraphs + metadata instead of full text.
+    """Compress evidence pack: truncated text + metadata instead of full text.
 
     Returns compact list with summary, url, title, relevance.
     1500 chars balances context usage (25 pages × 1500 = 37,500 chars) with
@@ -186,12 +186,9 @@ def _compact_evidence(pages, max_per_page=1500):
     compact = []
     for p in pages:
         text = p.get("text", "")
-        if text:
-            # Take first two paragraphs for better coverage
-            paragraphs = text.split("\n\n")
-            summary = "\n\n".join(paragraphs[:2])[:max_per_page]
-        else:
-            summary = ""
+        # Backend text is single-space normalized (no paragraph breaks),
+        # so truncate by characters rather than pretending to take "paragraphs".
+        summary = (text or "")[:max_per_page]
         compact.append({
             "url": p.get("url", ""),
             "title": p.get("title", ""),
@@ -224,15 +221,16 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
                 max_validate=max_validate,
                 query_variants=None,
                 compose=False,
+                query_type=query_type,
             )
         except Exception:
             continue
         for r in out.get("results", []):
-            raw_count += 1
             u = r.get("url")
             if not u or u in seen_page:
                 continue
             seen_page.add(u)
+            raw_count += 1
             if r.get("alive"):
                 alive_count += 1
             pages.append({
@@ -246,6 +244,9 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
             })
 
     level1_time = round(time.time() - start, 2)
+
+    # Only alive pages are real evidence — dead/blocked pages must not reach the LLM
+    pages = [p for p in pages if p.get("alive")]
 
     top_alive = [p["url"] for p in pages if p.get("alive")][:20]
     need_expand = alive_count < 15 or not _is_coverage_sufficient(pages, query)
@@ -276,9 +277,9 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
             img_out = image_search(query)
             for item in img_out.get("results", [])[:8]:
                 images.append({
-                    "url": item.get("url") or item.get("image_url") or item.get("url"),
-                    "title": item.get("title") or item.get("url"),
-                    "source": item.get("url"),
+                    "url": item.get("thumbnail") or item.get("page_url") or item.get("url"),
+                    "title": item.get("title") or item.get("page_url") or item.get("url"),
+                    "source": item.get("page_url") or item.get("url"),
                 })
         except Exception:
             pass
@@ -322,6 +323,12 @@ def _apply_post_retrieval_filter(evidence, query, final_limit=80):
     max_per_source_url = 4
     jaccard_threshold = 0.85
 
+    def _base_domain(url):
+        from urllib.parse import urlparse
+        host = (urlparse(url or "").hostname or "").lower()
+        parts = host.split(".")
+        return ".".join(parts[-2:]) if len(parts) > 2 else host
+
     accepted = []
     accepted_sets = []
     source_counts = {}
@@ -333,7 +340,8 @@ def _apply_post_retrieval_filter(evidence, query, final_limit=80):
         text = " ".join([item.get("title") or "", item.get("text") or "", item.get("snippet") or ""])
         tokens = _tokenize(text)
         if not tokens:
-            return any(
+            # Reject duplicates of empty-text items (previously inverted — accepted them)
+            return not any(
                 _selected_id(x) != _selected_id(item)
                 and " ".join([x.get("title") or "", x.get("text") or "", x.get("snippet") or ""]) == text
                 for x in accepted
@@ -347,12 +355,14 @@ def _apply_post_retrieval_filter(evidence, query, final_limit=80):
     for item in evidence:
         if len(accepted) >= final_limit:
             break
-        url = item.get("url") or ""
-        if source_counts.get(url, 0) >= max_per_source_url:
+        # Per-source quota is per base domain: per-URL keys never bind because
+        # duplicate URLs are already removed earlier in _safe_deep_research.
+        domain = _base_domain(item.get("url") or "")
+        if source_counts.get(domain, 0) >= max_per_source_url:
             continue
         if not _accept(item):
             continue
-        source_counts[url] = source_counts.get(url, 0) + 1
+        source_counts[domain] = source_counts.get(domain, 0) + 1
         accepted.append(item)
         text = " ".join([item.get("title") or "", item.get("text") or "", item.get("snippet") or ""])
         accepted_sets.append(_tokenize(text))
@@ -394,7 +404,7 @@ def _schema_search_deep():
                 },
                 "query_type": {
                     "type": "string",
-                    "enum": ["visual", "technical", "news", "historical", "comparison", "general"],
+                    "enum": ["visual", "technical", "news", "historical", "comparison", "video", "general"],
                     "description": "Agent-decided intent label. Backend does not branch on it.",
                 },
             },
@@ -472,7 +482,7 @@ def _schema_deep_research():
                 "max_chars": {"type": "integer", "description": "Text length cap per page (default 5000)."},
                 "query_type": {
                     "type": "string",
-                    "enum": ["visual", "technical", "news", "historical", "comparison", "general"],
+                    "enum": ["visual", "technical", "news", "historical", "comparison", "video", "general"],
                     "description": "Agent-decided intent label. Controls image search routing.",
                 },
             },
@@ -518,7 +528,7 @@ registry.register(
     schema=_schema_visit(),
     handler=lambda args, **_: visit_website_enhanced(
         args.get("url", ""),
-        max_chars=args.get("max_chars") or None,
+        max_chars=args.get("max_chars") or 8000,
     ),
     check_fn=lambda: visit_website_enhanced is not None,
     emoji="🌐",
