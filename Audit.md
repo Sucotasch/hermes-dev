@@ -981,7 +981,15 @@ blocked"), not a proxy outage.
 | Q3 Level-2 pre-filter: utility-path tokens + dedup-key cap (2/domain) before validation | ✅ | `c54dab9` |
 | Dead code: `synthesize_answer` removed; `_search_*`/`compose`/`fetch_page`/`image_search`/`VISUAL_ALLOWLIST` KEPT (reachable via CLI/tests/search_deep — not dead) | ✅ | `c54dab9` |
 
-Tests: 81/81 pass (75 prior + 6 new: registrable-domain, detect_blocked precision,
-unescape). All modules py_compile clean. Still open (product decisions): INT-3 fullsize
-discovery chain (extra network fetches), NEW-8 report size cap.
+Tests: 83/83 pass (75 prior + 8 new: registrable-domain incl. IPv4, detect_blocked
+precision incl. cdn-cgi, unescape). All modules py_compile clean. Still open
+(product decisions): INT-3 fullsize discovery chain (extra network fetches),
+NEW-8 report size cap.
+
+Code-review findings applied (`6732116`): (1) Level-2 utility-path filter narrowed
+to unambiguous system tokens AND first-path-segment only (content words like
+'about'/'help'/'press' removed — no more false skips of legit galleries);
+(2) bare `cdn-cgi` no longer counts as a block — requires challenge context
+(`cf-chl`/`challenge`); (3) IPv4 hosts guarded in `registrable_domain`
+(192.168.0.1 stays itself).
 
