@@ -725,3 +725,31 @@ These are **not** part of the fix batches above; they are recorded per instructi
 3. New unit tests from FIX-17.
 4. Network smoke (optional, requires internet): `python test_quick.py` and `python test_strategies.py` — expect no regressions in liveness classification; `blocked` counts may rise slightly (NEW-1 fix) — verify this is the intended behavior change.
 5. End-to-end (optional, requires local LLM): `python standalone/deep_research.py "test query" --validate 10` and one visual query to exercise FIX-6/FIX-14.
+
+---
+
+## 13. Implementation status (2026-08-10)
+
+All fix batches were implemented, validated, and committed on `fix/pipeline-quality`.
+Each commit is a rollback point.
+
+| Commit | Batch | Content |
+|---|---|---|
+| `8c69265` | baseline | working tree as-is before any fix |
+| `-` | A | standalone: `_validate_urls` quarantine+deferral (`_process_one`/`_partition` + final deferred pass), Pillow guard, `phase2_recovered` counter, `timings["total"]`, `quote()` image URLs, deep-read cap comment, `video` suffixes, classifier token parse + `video` type |
+| `baec8e6` | B | backend: `_check_url_live` rewrite (proxy GET actually delivers content, `blocked` flag for hard 4xx/5xx, reachable 503 retry, DNS/timeout proxy retry), real quarantine skip in `search_deep`, `_should_filter_url`/`_is_video_url` helpers, relevance sort, DDGS min_matches, 16:9 removed, tighter search patterns |
+| `e07a23e` | C | wrapper: `query_type` forwarding, thumbnail/page_url image shape, `max_chars or 8000`, alive-only evidence, per-domain source quota, `_accept` inversion, `_compact_evidence` char truncation, `video` in schema enums |
+| `b9ccc40` | D | tests: `_coverage.py` shared module, `test_coverage_gate.py` rewritten (5 tests), `test_check_url_live.py` (6), `test_scoring.py` (7); `restore.ps1` now copies `query_variants.py` + `_coverage.py` |
+| `4fea22d` | review | reviewer findings: defer-before-quarantine for 503/timeout/DNS in both consumers, proxy GET for 403/429/451 (was dead-end proxy HEAD), `video` in `query_variants.py`, monkeypatch-based tests |
+
+Validation results:
+- `py_compile`: all 14 modules OK.
+- pytest: **22/22 passed** (`test_query_variants`, `test_check_url_live`, `test_scoring`, `test_coverage_gate`).
+- Network smoke (`test_quick.py`): 3/3 real URLs correctly classified alive.
+
+Remaining open items (from §11 / §8, not fixed — need decisions):
+- `search_deep` results now sorted by relevance (NEW-7 fixed); report evidence size cap (NEW-8) — product call, not changed.
+- Standardize `_relevance_score` vs `content_relevance_score` (NEW-10).
+- Unify proxy defaults across modules (NEW-13).
+- Dead code cleanup (P1-15: unused `_search_*` strategies, `fetch_page`, `compose.py`, `synthesize_answer`, `VISUAL_ALLOWLIST`).
+- Thread-safety of shared curl_cffi sessions (P1-23), `verify=False` (P4), restore.ps1 process killing (P4).

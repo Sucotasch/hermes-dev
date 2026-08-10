@@ -43,7 +43,7 @@ User query
 
 ### Install dependencies
 ```bash
-pip install httpx curl_cffi ddgs beautifulsoup4 lxml PyQt5
+pip install httpx curl_cffi ddgs beautifulsoup4 lxml PyQt5 Pillow
 ```
 
 ### Deploy to Hermes

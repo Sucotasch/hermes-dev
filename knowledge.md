@@ -31,17 +31,13 @@ This repo is the **durable source of truth**: files are restored into the live H
 | `restore.ps1` | PowerShell restore script (7 files + backup + compose smoke probe) |
 | `CONTEXT.md` / `PROJECT_CONTEXT.md` / `README.md` | Durable session context, detailed docs (read for depth) |
 
-## Standalone vs Hermes: known gaps in the Hermes wrapper
+## Standalone vs Hermes: status as of 2026-08-10
 
-Verified as of 2026-07-05 (standalone is ahead):
+The wrapper was updated (Audit batches B/C): `query_type` is forwarded to `search_deep`; visual image URLs use `thumbnail`/`page_url`; `visit_website_tool` caps at 8000 chars; evidence keeps only alive pages; per-domain source quota; dedup inversion fixed; `video` added to schema enums, classifier, and suffix tables (backend `query_variants.py`); real domain quarantine and deferred 503 handling now work in both pipelines; `_check_url_live` retry paths active; tests 22/22 green.
 
-- `_safe_deep_research` does **not** forward `query_type` to `search_deep` in its multi-query loop (only single-query `_safe_search_deep` does) — the composite tool ignores intent.
-- Visual images come from `image_search` (Bing/Jina page URLs) instead of `extract_fullsize_images()` from page HTML + two-phase filter (format/dedup/size) — the standalone approach.
-- No LLM query enrichment (aliases for person queries) — standalone has `enrich_query`.
-- Query variants are generic static heuristics (`{token} history/trends/examples`), not query-type aware suffixes (standalone has per-type suffix tables, 11 types).
-- `query_type` schema enum has only 7 values (`visual/technical/news/historical/comparison/general`) vs standalone's 11 (missing `person/fact/science/education/art`).
-- Missing standalone fixes: domain quarantine (403/captcha→skip, 503→defer), platform-aware dedup (blogspot/livejournal path-based), mirror domains (bunkr), query-string dedup (`?m=0/1`), `_extract_main_content()` NoneType guard, phrase-based keywords check, `img_bonus` gallery detection for visual queries, GettyImages filter for person queries, sort-by-text-length before deep-read.
-- Standalone-only extras: video URL filter, gallery links section, service-path filter, `_filter_images_for_report`.
+Still standalone-only by design (orchestrator deep-read phase): platform-aware dedup (blogspot/livejournal), mirror domains (bunkr), query-string dedup, `img_bonus` gallery detection, GettyImages filter for person, sort-by-text-length before deep-read, gallery links section, `_filter_images_for_report`.
+
+Remaining gaps in the wrapper: no LLM enrichment (aliases for person queries — standalone `enrich_query`), schema enum still lacks `person/fact/science/education/art`, visual images still come from `image_search` rather than page-HTML extraction.
 
 When changing pipeline behavior: implement/verify in standalone first, then port to the wrapper deliberately while preserving wrapper invariants (top-level `registry.register()`, policy-free backend).
 
@@ -49,7 +45,7 @@ When changing pipeline behavior: implement/verify in standalone first, then port
 
 ```bash
 # Install deps (no package.json/requirements.txt — install manually)
-pip install httpx curl_cffi ddgs beautifulsoup4 lxml PyQt5
+pip install httpx curl_cffi ddgs beautifulsoup4 lxml PyQt5 Pillow
 
 # Run GUI
 python standalone/gui.py          # or double-click gui_launcher.bat
@@ -88,7 +84,7 @@ No linting/formatting/build config exists.
 ## Gotchas
 
 - 40–46% of URLs are blocked (403/Cloudflare); proxy retry helps ~5–10%. IMDB/Wikipedia/Reddit are effectively unreachable.
-- `query_variants` module is frequently missing after restore — backend degrades gracefully with a static fallback (expected, not a bug).
+- `query_variants` and `_coverage` modules are now copied by `restore.ps1` (was a known post-restore gap); if missing, backend/wrapper degrade gracefully with fallbacks.
 - `browser_dialog_tool.py` is a stub — don't rely on it.
 - `curl_cffi` caches one session per proxy+impersonation combo; restart Hermes after changing proxy env at runtime.
 - `content_relevance_score` is keyword-based — can't disambiguate namesakes like "Sara James" vs "Sara St James" without the entity-phrase gate.
