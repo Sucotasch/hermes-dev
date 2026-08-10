@@ -12,6 +12,7 @@ sys.path.insert(0, str(_BACKEND))
 import ddg_search
 import visit_website_enhanced as vwe
 from llm_client import chat_completion, classify_query_type, enrich_query
+from _common import normalize_url as _normalize_url, registrable_domain as _reg_domain
 
 
 # ── Readability-style content extractor ──────────────────────────────────────
@@ -215,9 +216,7 @@ def _dedup_key(url):
                 path_parts = (parsed.path or "/").strip("/").split("/")
                 first_segment = path_parts[0] if path_parts else ""
                 return f"{host}/{first_segment}"
-        parts = host.split(".")
-        base = ".".join(parts[-2:]) if len(parts) > 2 else host
-        return base
+        return _reg_domain(host)
     except Exception:
         return ""
 
@@ -340,10 +339,8 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
     from urllib.parse import urlparse
 
     def _base_domain(hostname):
-        if not hostname:
-            return ""
-        parts = hostname.split(".")
-        return ".".join(parts[-2:]) if len(parts) > 2 else hostname
+        """Public-suffix aware registrable domain (co.uk etc. kept whole)."""
+        return _reg_domain(hostname)
 
     validated = []
     alive_count = 0
@@ -568,6 +565,11 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 else:
                     img_bonus = 0
                 final_score = min(content_score + img_bonus, 1.0)
+                # Store the deep-read score so evidence selection (Step 9) and
+                # the image gate (Step 8) reuse it instead of re-scoring a
+                # truncated 500-char snippet (which produced rel=1.00 → 0.00
+                # mismatches in the 2026-08-10 run and dropped good galleries).
+                p["deep_score"] = final_score
                 # Threshold: 0.15 for normal, 0.05 for visual (keep image-rich pages)
                 threshold = 0.05 if is_visual else 0.15
                 if final_score < threshold:
@@ -593,6 +595,10 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 # Visual page with keywords but little text — keep if enough images
                 p["deep_text"] = text or ""
                 p["img_count"] = img_count
+                # Text is short here; floor the score so the page survives the
+                # evidence/image gates (it was kept for its images, not its text).
+                content_score = ddg_search.content_relevance_score(query, text or "")
+                p["deep_score"] = min(max(content_score, 0.3), 1.0)
                 deep_pages.append(p)
                 domain_counts[key] = domain_counts.get(key, 0) + 1
                 if log:
@@ -803,7 +809,6 @@ def run_deep_research(query, server_url="http://localhost:8888",
     seen_urls = set()
     variants = _query_variants(enriched_query, query_type)
 
-    from _common import normalize_url as _normalize_url
     for i, q in enumerate(variants[:max_variants]):
         r = ddg_search.web_search(q, count=search_count, region="wt-wt", safe="auto")
         variant_urls = []
@@ -974,7 +979,8 @@ def run_deep_research(query, server_url="http://localhost:8888",
     img_threshold = 0.05 if query_type == "visual" else 0.15
     for p in validated:
         snippet = p.get("snippet", "") or p.get("text", "")[:500]
-        rel = ddg_search.content_relevance_score(query, snippet)
+        deep = p.get("deep_score")
+        rel = deep if deep is not None else ddg_search.content_relevance_score(query, snippet)
         img_count = p.get("img_count", 0)
         has_kw = _has_query_keywords(snippet, query)
         # Keep if relevance passes threshold OR (visual + keywords + images)
@@ -1030,15 +1036,24 @@ def run_deep_research(query, server_url="http://localhost:8888",
             skipped_evidence.append(f"{url[:60]} (image URL, not content)")
             continue
 
-        snippet = p.get("snippet", "") or (text[:500] if text else "")
-        relevance = round(ddg_search.content_relevance_score(query, snippet), 2)
-        # Visual img_bonus: only if keywords present AND 15+ images (gallery)
+        # Prefer the deep-read score (already includes the gallery img_bonus);
+        # only fall back to snippet re-scoring for pages that were never
+        # deep-read. Re-scoring a truncated snippet was the cause of the
+        # rel=1.00 → 0.00 mismatch (telegra.ph, autoadult) in the 2026-08-10 run.
+        deep = p.get("deep_score")
         has_keywords = _has_query_keywords(text, query)
-        if is_visual and has_keywords and img_count >= 15:
-            img_bonus = min((img_count - 14) * 0.02, 0.25)
+        if deep is not None:
+            relevance = round(deep, 2)
+            final_relevance = relevance
         else:
-            img_bonus = 0
-        final_relevance = min(relevance + img_bonus, 1.0)
+            snippet = p.get("snippet", "") or (text[:500] if text else "")
+            relevance = round(ddg_search.content_relevance_score(query, snippet), 2)
+            # Visual img_bonus: only if keywords present AND 15+ images (gallery)
+            if is_visual and has_keywords and img_count >= 15:
+                img_bonus = min((img_count - 14) * 0.02, 0.25)
+            else:
+                img_bonus = 0
+            final_relevance = min(relevance + img_bonus, 1.0)
 
         if final_relevance < min_relevance:
             skipped_evidence.append(f"{url[:60]} (relevance={final_relevance:.2f} < {min_relevance})")

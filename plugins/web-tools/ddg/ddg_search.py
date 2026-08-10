@@ -14,6 +14,7 @@ Improvements over v2:
 
 import importlib.util
 import json, re, sys, time, random, os, urllib.parse
+import html as _html
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
@@ -1434,7 +1435,9 @@ def extract_fullsize_images(html, base_url=""):
     resolved = []
     parsed_base = urllib.parse.urlparse(base_url) if base_url else None
     for url in urls:
-        url = url.strip()
+        # HTML entities in attribute values (…jpg&amp;ssl=1) break both the
+        # download and the markdown image link — decode before dedup.
+        url = _html.unescape(url.strip())
         if not url:
             continue
         if url.startswith("//"):
@@ -1463,6 +1466,7 @@ def extract_fullsize_images(html, base_url=""):
                 img_url = "https:" + img_url
             elif img_url.startswith("/") and parsed_base:
                 img_url = f"{parsed_base.scheme}://{parsed_base.netloc}{img_url}"
+            img_url = _html.unescape(img_url)
             if img_url in seen or not img_url.startswith("http"):
                 continue
             # Skip tiny images by width/height attributes

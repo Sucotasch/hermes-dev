@@ -13,6 +13,7 @@ Improvements over v2:
 """
 
 import json, re, sys, time, random, urllib.parse
+import html as _html
 from bs4 import BeautifulSoup
 
 # curl_cffi imported lazily in _get_session to avoid circular import issues
@@ -585,7 +586,9 @@ def extract_fullsize_images(html, base_url=""):
     seen = set()
     resolved = []
     for url in urls:
-        url = url.strip()
+        # HTML entities in attribute values (…jpg&amp;ssl=1) break both the
+        # download and the markdown image link — decode before dedup.
+        url = _html.unescape(url.strip())
         if not url:
             continue
         if url.startswith("//"):
@@ -612,6 +615,7 @@ def extract_fullsize_images(html, base_url=""):
                 img_url = "https:" + img_url
             elif img_url.startswith("/") and parsed_base:
                 img_url = "%s://%s%s" % (parsed_base.scheme, parsed_base.netloc, img_url)
+            img_url = _html.unescape(img_url)
             if img_url in seen or not img_url.startswith("http"):
                 continue
             w = re.search(r'width="(\d+)"', tag, re.I)

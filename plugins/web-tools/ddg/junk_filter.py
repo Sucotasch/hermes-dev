@@ -187,10 +187,14 @@ def is_ad_url(url, page_url=None):
 
 def _third_party(page_host: str, url_host: str) -> bool:
     """Approximate third-party check (different registrable domains)."""
-    def base(host):
-        parts = host.split(".")
-        return ".".join(parts[-2:]) if len(parts) > 1 else host
-    return base(page_host) != base(url_host)
+    try:
+        from _common import registrable_domain
+        return registrable_domain(page_host) != registrable_domain(url_host)
+    except Exception:
+        def base(host):
+            parts = host.split(".")
+            return ".".join(parts[-2:]) if len(parts) > 1 else host
+        return base(page_host) != base(url_host)
 
 
 # --- Junk transitions (forum chrome etc.) -----------------------------------

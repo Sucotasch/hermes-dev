@@ -76,11 +76,61 @@ def normalize_url(url):
         return url
 
 
+# Multi-label public suffixes (second-level TLDs): for these the registrable
+# domain is THREE labels (www.example.co.uk → example.co.uk), not two. Without
+# this table `markhewittphotography.co.uk` collapsed to `co.uk` and the whole
+# TLD got domain-quarantined after two blocked pages (observed in the 2026-08-10
+# test run: "BLOCK DOMAIN: co.uk").
+_MULTI_LABEL_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "net.uk", "me.uk", "ltd.uk", "plc.uk",
+    "co.za", "org.za", "net.za", "gov.za", "ac.za",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au",
+    "co.nz", "org.nz", "net.nz", "ac.nz", "govt.nz",
+    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp",
+    "com.br", "net.br", "org.br", "gov.br", "edu.br",
+    "com.mx", "org.mx", "net.mx", "gob.mx", "edu.mx",
+    "com.ar", "org.ar", "net.ar", "gob.ar", "edu.ar",
+    "com.tr", "org.tr", "net.tr", "gov.tr", "edu.tr",
+    "co.in", "org.in", "net.in", "gov.in", "ac.in", "edu.in",
+    "com.cn", "org.cn", "net.cn", "gov.cn", "edu.cn",
+    "com.ru", "org.ru", "net.ru", "msk.ru", "spb.ru",
+    "com.ua", "org.ua", "net.ua", "gov.ua", "edu.ua", "in.ua",
+    "com.pl", "org.pl", "net.pl", "gov.pl", "edu.pl",
+    "co.kr", "or.kr", "com.eg", "com.sg", "com.my", "com.hk", "com.tw",
+    "co.il", "org.il", "com.il", "co.id", "com.vn", "com.co", "com.ec",
+    "co.th", "com.pe", "com.ve", "com.uy", "co.cr", "com.bo", "com.py",
+    "co.ke", "co.ug", "co.tz", "co.zw", "com.ng", "com.gh", "co.ao",
+    "com.bd", "com.pk", "com.lk", "com.np",
+})
+
+
+def registrable_domain(hostname):
+    """Registrable-domain approximation (public-suffix aware).
+
+    www.example.co.uk → example.co.uk; example.co.uk stays itself.
+    Fallback: last two labels. Fail-open: "" on any error.
+    """
+    try:
+        host = (hostname or "").strip().lower().rstrip(".")
+    except Exception:
+        return ""
+    if not host:
+        return ""
+    parts = host.split(".")
+    if len(parts) <= 2:
+        return host
+    last2 = ".".join(parts[-2:])
+    if last2 in _MULTI_LABEL_SUFFIXES:
+        if len(parts) == 3:
+            return host                 # x.co.uk is already the registrable domain
+        return ".".join(parts[-3:])    # www.x.co.uk / a.b.co.uk → x.co.uk
+    return ".".join(parts[-2:])
+
+
 def base_domain(url):
-    """Registrable-domain approximation: last two labels of the hostname."""
+    """Registrable-domain approximation for a full URL."""
     try:
         host = (urlparse(url).hostname or "").lower()
     except Exception:
         return ""
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) > 2 else host
+    return registrable_domain(host)
