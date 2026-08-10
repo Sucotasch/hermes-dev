@@ -961,3 +961,27 @@ filtering is solid. `_check_url_live` HEAD→GET flow, binary-media guard, defer
 reachable (verified after the run); the 81/81 "proxy failed" markers were a side
 effect of B1 (nothing reached the proxy because direct pages already "looked
 blocked"), not a proxy outage.
+
+### 15.4 Implementation status (2026-08-10, commits after `71d1fdf`)
+
+| Item | Status | Commit |
+|---|---|---|
+| B1 block detection (captcha-config false positive) — `_detect_blocked` + `vwe._is_blocked`: real challenge markers only (hcaptcha widget/iframe, recaptcha+verify), dropped bare `'forbidden'`/`'страница не найдена'` | ✅ verified end-to-end: commons.wikimedia & scrolller (blocked in the log) now ALIVE, HTTP 200 | `ac2775e` |
+| B5 `vk.ru` added to BLOCKED_DOMAINS | ✅ | `ac2775e` |
+| Q2 keyword-soup (`+`-joined query words) filter in Step 3 | ✅ 7/8 real spam URLs flagged, hyphen galleries untouched | `ac2775e` |
+| Q5 leftover `_tmp_replace_check_url_live.py` removed (was git-tracked) | ✅ | `ac2775e` |
+| B2 public-suffix `registrable_domain` (`_common.py`) wired into `_validate_urls`, `_dedup_key`, wrapper, junk-filter third-party | ✅ `markhewittphotography.co.uk` ≠ `co.uk` | `398e8bb` |
+| B3 `deep_score` stored in deep-read; Steps 8/9 reuse it (no snippet re-scoring) | ✅ | `398e8bb` |
+| B4 `html.unescape()` on extracted image URLs (both copies) | ✅ | `398e8bb` |
+| P1-23 thread-local curl_cffi sessions (`_reset_sessions()` replaces `_sessions.clear()`) | ✅ | `c54dab9` |
+| NEW-13 unified proxy defaults for vwe (env/file, mirrors ddg_search) | ✅ | `c54dab9` |
+| P4 `verify=False` → configurable `DDG_TLS_VERIFY=1` (default unchanged) | ✅ | `c54dab9` |
+| P4 restore.ps1 stops only hermes/`gui_launcher` or python/node with `hermes` in cmdline | ✅ | `c54dab9` |
+| Q1 classifier: visual now includes explicit gallery/image/pics/photos keywords | ✅ (needs an LLM-server re-run to confirm) | `c54dab9` |
+| Q3 Level-2 pre-filter: utility-path tokens + dedup-key cap (2/domain) before validation | ✅ | `c54dab9` |
+| Dead code: `synthesize_answer` removed; `_search_*`/`compose`/`fetch_page`/`image_search`/`VISUAL_ALLOWLIST` KEPT (reachable via CLI/tests/search_deep — not dead) | ✅ | `c54dab9` |
+
+Tests: 81/81 pass (75 prior + 6 new: registrable-domain, detect_blocked precision,
+unescape). All modules py_compile clean. Still open (product decisions): INT-3 fullsize
+discovery chain (extra network fetches), NEW-8 report size cap.
+
