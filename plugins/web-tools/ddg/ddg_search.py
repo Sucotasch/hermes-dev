@@ -270,7 +270,7 @@ def _detect_blocked(html):
         'cf-chl-check', 'checking your browser',
         'please verify you are human', 'access denied',
         '403 forbidden', '429 too many', '503 service unavailable',
-        'challenge-platform', 'cdn-cgi',
+        'challenge-platform',
         'browser left', 'attention required',
         'anomaly-detected', 'perimeterx', 'px-captcha',
         'turn on javascript', 'enable cookies',
@@ -298,6 +298,12 @@ def _detect_blocked(html):
         return True
     if ('please complete the captcha' in html_lower or 'enter the captcha' in html_lower
             or 'complete the captcha to continue' in html_lower):
+        return True
+    # 'cdn-cgi' alone is NOT a block: every Cloudflare-served page (rocket
+    # loader, __cf_email__, cf-turnstile refs) carries /cdn-cgi/ paths.
+    # Only count it together with a real challenge marker.
+    if ('cdn-cgi' in html_lower and
+            ('challenge' in html_lower or 'cf-chl' in html_lower)):
         return True
     for ind in block_indicators:
         if ind in html_lower:

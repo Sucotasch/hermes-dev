@@ -114,6 +114,20 @@ def test_detect_blocked_ignores_plain_404_text():
     assert ddg_search._detect_blocked("<html>\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430 404</html>") is False
 
 
+def test_detect_blocked_cdn_cgi_needs_challenge():
+    # Every Cloudflare-served page carries /cdn-cgi/ paths (rocket loader,
+    # email protection) — alone it is NOT a block.
+    normal = '<html><script src="/cdn-cgi/scripts/rocket-loader.min.js"></script><p>content</p></html>'
+    assert ddg_search._detect_blocked(normal) is False
+    challenged = '<html><div id="cf-chl-container"><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></div></html>'
+    assert ddg_search._detect_blocked(challenged) is True
+
+
+def test_registrable_domain_ipv4():
+    assert registrable_domain("192.168.0.1") == "192.168.0.1"
+    assert registrable_domain("10.0.0.255") == "10.0.0.255"
+
+
 # --- HTML entity unescape in extracted image URLs ---------------------------
 
 def test_extract_fullsize_images_unescapes_entities():

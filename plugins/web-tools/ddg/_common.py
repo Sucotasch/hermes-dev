@@ -7,7 +7,10 @@ Shared URL-hygiene helpers (ported from Temp/web-media-parser/src/parser/utils.p
   repeated adjacent path segments (anti urljoin-bloat), lowercase scheme/domain.
 """
 
+import re
 from urllib.parse import urlparse, parse_qsl, urlencode
+
+_IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
 # Tracking query params that never affect content identity — stripped during
 # normalization so the same resource re-encountered with different tracking
@@ -116,6 +119,9 @@ def registrable_domain(hostname):
         return ""
     if not host:
         return ""
+    # IPv4 hosts are not domains: never fold 192.168.0.1 into "0.1".
+    if _IPV4_RE.match(host):
+        return host
     parts = host.split(".")
     if len(parts) <= 2:
         return host

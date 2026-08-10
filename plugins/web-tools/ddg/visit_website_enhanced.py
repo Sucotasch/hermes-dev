@@ -262,6 +262,11 @@ def _is_blocked(html):
     if ('please complete the captcha' in text_lower or 'enter the captcha' in text_lower
             or 'complete the captcha to continue' in text_lower):
         return True
+    # 'cdn-cgi' alone is NOT a block: every Cloudflare-served page (rocket
+    # loader, __cf_email__, cf-turnstile refs) carries /cdn-cgi/ paths.
+    if ('cdn-cgi' in text_lower and
+            ('challenge' in text_lower or 'cf-chl' in text_lower)):
+        return True
 
     blocks = [
         ('cf-chl-check', 'cloudflare_challenge'),
@@ -273,7 +278,6 @@ def _is_blocked(html):
         ('429 too many', 'rate_limited'),
         ('503 service unavailable', 'service_unavailable'),
         ('challenge-platform', 'cloudflare_challenge'),
-        ('cdn-cgi', 'cloudflare_challenge'),
         ('browser left', 'browser_check'),
         ('attention required', 'attention_required'),
         ('turn on javascript', 'js_required'),

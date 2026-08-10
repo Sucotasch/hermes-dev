@@ -194,12 +194,14 @@ _PLATFORM_DOMAINS = {
 
 # Utility/system path tokens never worth expanding into (Level-2 candidates):
 # report-abuse, login/register, privacy/terms, feeds, etc.
+# NOTE: only unambiguous system tokens. Content words like 'about'/'help'/
+# 'press'/'api' were removed — they appear inside legit gallery paths
+# (e.g. 'about-bottomless-bikinis') and must never be skipped.
 _UTILITY_TOKENS = {
-    "about", "contact", "privacy", "terms", "dmca", "sitemap", "faq",
-    "help", "support", "login", "signin", "signup", "register", "forgot",
-    "password", "account", "settings", "advertise", "press", "careers",
-    "report", "abuse", "cookie", "cookies", "newsletter", "disclaimer",
-    "license", "api", "rss", "feed", "status", "uptime",
+    "login", "signin", "signup", "register", "forgot", "password",
+    "account", "settings", "privacy", "terms", "contact", "dmca",
+    "sitemap", "faq", "advertise", "newsletter", "disclaimer", "cookie",
+    "cookies", "license", "rss", "report", "abuse", "status", "uptime",
 }
 
 # Mirror domains: same content on different TLDs
@@ -952,11 +954,14 @@ def run_deep_research(query, server_url="http://localhost:8888",
                         except Exception:
                             pass
                         # Skip utility/homepage-ish links (report-abuse, login,
-                        # feeds, contact…): token-based, no substring risk.
+                        # feeds, contact…). Token-based AND first-segment-only:
+                        # a utility token mid-path (e.g. 'gallery/contact-x')
+                        # is never enough to drop a candidate.
                         try:
                             lpath = urlparse(href).path.strip("/").lower()
                             path_tokens = re.split(r"[^a-z0-9]+", lpath)
-                            if lpath in _HOMEPAGE_PATHS or any(t in _UTILITY_TOKENS for t in path_tokens):
+                            first = path_tokens[0] if path_tokens else ""
+                            if lpath in _HOMEPAGE_PATHS or first in _UTILITY_TOKENS:
                                 continue
                         except Exception:
                             pass
