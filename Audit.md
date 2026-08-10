@@ -995,7 +995,16 @@ by `_FULLSIZE_DISCOVER_BUDGET` (12s/run), zero network when no `link` rule
 matches. `extract_thumbnail_links` collects `<a href><img>` viewer-page pairs.
 Two source fixes while porting: `png` added to the `<img>` fallback regex
 (source omitted it); `$n` substitution now also applies to POST data.
-`restore.ps1` copies discovery.py. 98/98 tests green, review pending.
+`restore.ps1` copies discovery.py. 98/98 tests green.
+
+Review findings applied (`19f5adb`): (1) `_Sieve.load()` no longer continue-drops
+rules whose `to` is unconvertible JS — they stay in `_all_rules` and their static
+`link` chains now feed INT-3 (`_link_rules` 526 → **654**, of which 103 have a
+static `url` template: 23 with plain `res` regex + 80 via the `<img>` fallback);
+INT-1 img transforms unaffected (`_try_rule` skips rules without a transform).
+(2) Discovered fullsize URLs are PREPENDED to `imgs` so the
+`imgs[:max_imgs_per_page]` slice no longer discards them. (3) `discover_thumbnails`
+caches per-viewer-href results (no duplicate fetches).
 
 Code-review findings applied (`6732116`): (1) Level-2 utility-path filter narrowed
 to unambiguous system tokens AND first-path-segment only (content words like
