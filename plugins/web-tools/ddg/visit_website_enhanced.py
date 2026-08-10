@@ -15,9 +15,28 @@ Improvements over v2:
 import json, re, sys, time, random, os, urllib.parse
 import html as _html
 import threading
+import importlib.util
 from bs4 import BeautifulSoup
 
 # curl_cffi imported lazily in _get_session to avoid circular import issues
+
+# Shared URL-hygiene helpers (_common.py lives in the same directory).
+_NORMALIZE_URL = None
+_STRIP_TRACKING = None
+try:
+    _cm_path = os.path.join(os.path.dirname(__file__), '_common.py')
+    _cm_spec = importlib.util.spec_from_file_location('_common', _cm_path)
+    _cm_module = importlib.util.module_from_spec(_cm_spec)
+    _cm_spec.loader.exec_module(_cm_module)
+    _NORMALIZE_URL = _cm_module.normalize_url
+    _STRIP_TRACKING = _cm_module.strip_tracking_params
+    _CONSENT_HEADER = _cm_module.consent_cookie_header
+except Exception:
+    def _normalize_url(u):
+        return u
+    _NORMALIZE_URL = _normalize_url
+    _STRIP_TRACKING = _normalize_url
+    _CONSENT_HEADER = lambda url: None
 
 # ── Config ──────────────────────────────────────────────────────────────────
 # Proxy resolution mirrors ddg_search (DDG_PROXY env → HTTPS_PROXY/HTTP_PROXY →
@@ -144,9 +163,15 @@ def _fetch(url, referrer=None, cookies=None):
         if m:
             extra_headers["Referer"] = f"https://{m.group(1)}/"
     
-    # Cookies
+    # Cookies: explicit cookies win; otherwise pre-set consent/age cookies
+    # (WP-5.2 port) so cookie-consent and age-verification walls are answered
+    # on the FIRST request instead of serving a gateway stub.
     if cookies:
         extra_headers["Cookie"] = cookies
+    else:
+        consent = _CONSENT_HEADER(url)
+        if consent:
+            extra_headers["Cookie"] = consent
     
     # ── Try curl_cffi ──
     session = _get_session()
@@ -631,9 +656,14 @@ def extract_fullsize_images(html, base_url=""):
             url = "https:" + url
         elif url.startswith("/") and parsed_base:
             url = "%s://%s%s" % (parsed_base.scheme, parsed_base.netloc, url)
-        if url in seen:
+        # Dedup by NORMALIZED identity (utm_*/fbclid variants of the same
+        # image collapse to one) but keep the tracking-stripped URL for output
+        # (signed CDN params and their order are preserved).
+        key = _NORMALIZE_URL(url)
+        if key in seen:
             continue
-        seen.add(url)
+        seen.add(key)
+        url = _STRIP_TRACKING(url)
         if _TRACKING_IMG_RE.search(url):
             continue
         # Filter trash media (icons, animated gifs, svg)
@@ -652,8 +682,12 @@ def extract_fullsize_images(html, base_url=""):
             elif img_url.startswith("/") and parsed_base:
                 img_url = "%s://%s%s" % (parsed_base.scheme, parsed_base.netloc, img_url)
             img_url = _html.unescape(img_url)
-            if img_url in seen or not img_url.startswith("http"):
+            if not img_url.startswith("http"):
                 continue
+            if _NORMALIZE_URL(img_url) in seen:
+                continue
+            seen.add(_NORMALIZE_URL(img_url))
+            img_url = _STRIP_TRACKING(img_url)
             w = re.search(r'width="(\d+)"', tag, re.I)
             h = re.search(r'height="(\d+)"', tag, re.I)
             if (w and int(w.group(1)) < 50) or (h and int(h.group(1)) < 50):

@@ -13,6 +13,11 @@ import ddg_search
 import visit_website_enhanced as vwe
 from llm_client import chat_completion, classify_query_type, enrich_query
 from _common import normalize_url as _normalize_url, registrable_domain as _reg_domain
+try:
+    from junk_filter import should_skip_crawl_url
+except Exception:
+    def should_skip_crawl_url(url, extra=None):
+        return False
 
 
 # ── Readability-style content extractor ──────────────────────────────────────
@@ -222,6 +227,10 @@ def _dedup_key(url):
     Strips query params (?m=0, ?m=1) and handles mirror domains."""
     from urllib.parse import urlparse
     try:
+        # Normalize first so utm_*/fbclid variants of the SAME page collapse
+        # to one dedup key (a tracking-suffixed search hit must not bypass
+        # the per-domain/page cap). Signed params are not in the tracking set.
+        url = _normalize_url(url or "")
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         # Handle mirror domains
@@ -235,6 +244,40 @@ def _dedup_key(url):
         return _reg_domain(host)
     except Exception:
         return ""
+
+
+def _is_likely_content_page(url):
+    """URL-structure signal that a page is content (gallery/viewer/article),
+    not navigation. Ported from web-media-parser `_is_likely_content_page`
+    (path/query keywords, numeric IDs, date patterns).
+
+    Used as a TIE-BREAKER when relevance scores are equal — never overrides
+    the text-relevance ordering itself.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path = (parsed.path or "").lower()
+        query = (parsed.query or "").lower()
+        fragment = (parsed.fragment or "").lower()
+        content_patterns = (
+            "view", "show", "gallery", "album", "photo", "image", "pic",
+            "media", "full", "display", "post", "entry", "article",
+            "story", "video", "watch", "page", "item", "content",
+            "viewer", "collection", "detail", "preview", "original",
+            "fullsize", "large", "thread", "threads", "item", "posts",
+        )
+        if any(p in path for p in content_patterns):
+            return True
+        if any(p in query for p in content_patterns) or any(p in fragment for p in content_patterns):
+            return True
+        if re.search(r"\d+\.html(?:$|\?)", path) or re.search(r"/\d{3,}", path):
+            return True
+        if re.search(r"/(?:19|20)\d{2}/(?:0[1-9]|1[0-2])/", path):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _is_keyword_soup(url, query):
@@ -884,8 +927,11 @@ def run_deep_research(query, server_url="http://localhost:8888",
     _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "rutube", "yandex.ru/video",
                       "dzen.ru/video", "vimeo.com", "tiktok.com")
     _VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
-    _SERVICE_PATHS = ("/feed", "/preload", "/place", "/login", "/signin",
-                      "/signup", "/register", "/settings", "/dashboard", "/account")
+    # Technical path prefixes that are never content. Unlike the old
+    # _SERVICE_PATHS substring list (/account killed /accounting), the
+    # legal/account/noise segments are now matched as WHOLE path segments via
+    # junk_filter.should_skip_crawl_url (ported WP-1) — precise and safe.
+    _SERVICE_PREFIXES = ("/feed", "/preload", "/place")
     for r in all_results:
         url = r.get("url", "")
         if ddg_search.is_blocked_domain(url):
@@ -897,7 +943,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 homepage_urls.append(url)
             elif any(p in url_lower for p in _SEARCH_PATTERNS):
                 search_urls.append(url)
-            elif any(p in path for p in _SERVICE_PATHS):
+            elif any(path.startswith(p.strip("/")) for p in _SERVICE_PREFIXES):
+                service_urls.append(url)
+            elif should_skip_crawl_url(url):
+                # WP-1: legal/account/noise segments (login, privacy, terms,
+                # checkout, sitemap, …) — such pages hold neither the queried
+                # text content nor gallery images, so skip the validation
+                # request entirely (precision-first: whole segments only).
                 service_urls.append(url)
             elif _is_keyword_soup(url, query):
                 # SEO '+'-keyword stuffing (bottomless+bikini+pics on throwaway
@@ -944,8 +996,11 @@ def run_deep_research(query, server_url="http://localhost:8888",
         if page_images:
             log(f"  Validation images: {len(page_images)} from {len(validated)} pages")
 
-    # Step 5: Rank by relevance
-    validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+    # Step 5: Rank by relevance (URL content-signal breaks ties so gallery/
+    # viewer pages win over equal-score nav pages)
+    validated.sort(key=lambda x: (x.get("relevance", 0),
+                                  _is_likely_content_page(x.get("url", ""))),
+                   reverse=True)
 
     # Step 6: Level 2 expansion
     level2_count = 0
@@ -1020,7 +1075,9 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 validated.append(p)
             level2_count = len([p for p in l2_val if p.get("relevance", 0) >= 0.2])
             alive_count += l2_alive
-            validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+            validated.sort(key=lambda x: (x.get("relevance", 0),
+                                          _is_likely_content_page(x.get("url", ""))),
+                           reverse=True)
         timings["level2"] = round(time.time() - t, 1)
         log(f"  +{level2_count} pages ({timings.get('level2', 0)}s)")
 

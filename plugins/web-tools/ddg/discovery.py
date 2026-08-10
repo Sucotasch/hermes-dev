@@ -101,6 +101,15 @@ def discover_thumbnails(pairs, page_url="", budget=_BUDGET_DEFAULT,
     their thumbnails — nothing is lost, just not upgraded. `fetch` is
     injectable for tests (defaults to the curl_cffi single-shot fetch).
     """
+    # WP-1: drop legal/account/noise viewer links (login, privacy, …) before
+    # any network I/O — such pages hold no fullsize originals. Precision-first
+    # whole-segment match; allowlisted hosts and real gallery paths pass.
+    try:
+        from junk_filter import should_skip_crawl_url
+        pairs = [(t, h) for t, h in pairs
+                 if h and not should_skip_crawl_url(h)]
+    except Exception:
+        pass
     pairs = list(pairs)[:max_links]
     if not pairs:
         return {}

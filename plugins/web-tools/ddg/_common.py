@@ -21,6 +21,35 @@ TRACKING_PARAMS = frozenset({
 })
 
 
+def strip_tracking_params(url):
+    """Remove only tracking query params (utm_*, fbclid, gclid, …), keep the
+    order and values of every other parameter.
+
+    Unlike normalize_url this does NOT sort or re-encode the query, so signed
+    CDN URLs (token/signature/expiry params) survive untouched — the URL stays
+    byte-identical apart from the removed tracking keys. Fail-open.
+    """
+    try:
+        if not url or "?" not in url:
+            return url
+        base, _, query = url.partition("?")
+        if not query:
+            return url
+        kept = []
+        changed = False
+        for pair in query.split("&"):
+            key = pair.split("=", 1)[0].lower()
+            if key in TRACKING_PARAMS:
+                changed = True
+                continue
+            kept.append(pair)
+        if not changed:
+            return url
+        return base + ("?" + "&".join(kept) if kept else "")
+    except Exception:
+        return url
+
+
 def normalize_url(url):
     """Normalize a URL for stable identity/dedup.
 
@@ -140,3 +169,49 @@ def base_domain(url):
     except Exception:
         return ""
     return registrable_domain(host)
+
+
+# Pre-emptive consent/age-gate cookies (ported from web-media-parser WP-5.2).
+# Sent with the FIRST request to a page so cookie-consent and age-verification
+# walls are answered before they render — the server then serves the real
+# content instead of a gateway stub. Cookie sessions still persist any
+# Set-Cookie the site returns (per-thread session cache), giving per-domain
+# continuity across the run.
+CONSENT_COOKIES = {
+    "cookieconsent_status": "dismiss",
+    "gdpr_accepted": "true",
+    "cookies_accepted": "true",
+    "euconsent": "true",
+    "CookieConsent": "true",
+    "cc_cookie_accept": "1",
+    "cookie_consent": "true",
+    "privacy_policy_accepted": "true",
+    # Pre-emptive strike for age gates and gateways
+    "age_verified": "1",
+    "vantage": "1",
+    "over18": "1",
+    "nw": "1",
+    "nsfw": "1",
+    "terms": "1",
+}
+
+# URLs we must never decorate with consent cookies: the search/reader proxy
+# (r.jina.ai) and the search engine itself.
+_NO_CONSENT_HOST_HINTS = ("r.jina.ai", "duckduckgo.com", "html.duckduckgo.com")
+
+
+def consent_cookie_header(url):
+    """Return a `Cookie` header value with pre-set consent/age cookies, or None.
+
+    Never applied to search/reader proxies (r.jina.ai, duckduckgo). Fail-open:
+    any error returns None (no cookies, request proceeds unchanged).
+    """
+    try:
+        if not url or not isinstance(url, str):
+            return None
+        low = url.lower()
+        if any(h in low for h in _NO_CONSENT_HOST_HINTS):
+            return None
+        return "; ".join(f"{k}={v}" for k, v in CONSENT_COOKIES.items())
+    except Exception:
+        return None

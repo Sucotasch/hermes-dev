@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from junk_filter import is_ad_url, should_skip_junk_url
+from junk_filter import is_ad_url, should_skip_junk_url, should_skip_crawl_url
 
 
 # --- ad URL classification -----------------------------------------------
@@ -100,3 +100,63 @@ def test_allowlist_passes_junk_transitions(monkeypatch):
 def test_should_skip_junk_fail_open():
     assert should_skip_junk_url(None) is False
     assert should_skip_junk_url("") is False
+
+
+# --- should_skip_crawl_url (WP-1 segment-aware) ---------------------------
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/login",
+    "https://example.com/privacy/policy",
+    "https://example.com/account/settings",
+    "https://example.com/terms",
+    "https://example.com/checkout",
+    "https://example.com/sitemap.xml",
+    "https://example.com/robots.txt",
+    "https://example.com/wp-admin/",
+    "https://example.com/?utm_source=x",
+    "https://example.com/go?utm_source=x&utm_medium=y",
+    "https://cdn.doubleclick.net/page",
+    "https://example.com/style.css",
+])
+def test_should_skip_crawl_url_positives(url):
+    assert should_skip_crawl_url(url) is True, url
+
+
+@pytest.mark.parametrize("url", [
+    # real content pages must never be skipped
+    "https://example.com/gallery/photo/123",
+    "https://example.com/media/uploads/album",
+    "https://example.com/tag/brunette-14",
+    "https://example.com/category/asian",
+    # 'ad' substring inside 'media'/'upload' must NOT skip
+    "https://cdn.example.com/media/uploads/photo",
+    # segment 'account' only matches whole segment — 'myaccount' is content
+    "https://example.com/myaccount/photo",
+    # direct media files are skipped (not pages) — see file-junk positives
+    # below; a bare directory without extension stays a candidate
+    "https://example.com/downloads/setup",
+])
+def test_should_skip_crawl_url_negatives(url):
+    assert should_skip_crawl_url(url) is False, url
+
+
+def test_should_skip_crawl_url_extra_stop_words():
+    assert should_skip_crawl_url(
+        "https://example.com/zoneprivacy", ["zoneprivacy"]) is True
+    assert should_skip_crawl_url(
+        "https://example.com/gallery/x", ["zoneprivacy"]) is False
+    # short stop words (<3 chars) are ignored (precision)
+    assert should_skip_crawl_url(
+        "https://example.com/ad", ["ad"]) is False
+
+
+def test_should_skip_crawl_url_allowlist(monkeypatch):
+    import junk_filter
+    monkeypatch.setattr(junk_filter, "load_allowlist", lambda: {"example.com"})
+    assert should_skip_crawl_url("https://example.com/login") is False
+
+
+def test_should_skip_crawl_url_fail_open():
+    assert should_skip_crawl_url("") is True
+    assert should_skip_crawl_url(None) is True
+    assert should_skip_crawl_url("https://example.com/gallery/123") is False

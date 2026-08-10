@@ -7,7 +7,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _common import normalize_url, base_domain, registrable_domain
+from _common import (
+    normalize_url, base_domain, registrable_domain, strip_tracking_params,
+    consent_cookie_header,
+)
 import ddg_search
 
 
@@ -135,3 +138,78 @@ def test_extract_fullsize_images_unescapes_entities():
     urls = ddg_search.extract_fullsize_images(html, "https://example.com/")
     assert urls and "&amp;" not in urls[0]
     assert urls[0] == "https://i0.wp.com/x.jpg&ssl=1"
+
+
+# --- _is_likely_content_page (WP-4 URL content signal) ---------------------
+
+# --- strip_tracking_params (safe output for image URLs) -------------------
+
+def test_strip_tracking_params():
+    url = "https://cdn.example.com/a.jpg?utm_source=x&id=5&fbclid=abc"
+    out = strip_tracking_params(url)
+    assert "utm_source" not in out
+    assert "fbclid" not in out
+    # Non-tracking params keep their ORDER (signed URLs survive)
+    assert out == "https://cdn.example.com/a.jpg?id=5"
+
+
+def test_strip_tracking_params_keeps_signed_order():
+    # Order of non-tracking params must NOT be re-sorted (signature risk)
+    url = "https://cdn.x.com/f.jpg?token=aaa&expires=999&utm_campaign=y&sig=zzz"
+    out = strip_tracking_params(url)
+    assert out == "https://cdn.x.com/f.jpg?token=aaa&expires=999&sig=zzz"
+
+
+def test_strip_tracking_params_noop():
+    url = "https://cdn.x.com/f.jpg?w=800&h=600"
+    assert strip_tracking_params(url) == url
+    assert strip_tracking_params("https://cdn.x.com/f.jpg") == "https://cdn.x.com/f.jpg"
+
+
+def test_extract_fullsize_images_dedup_utm_variants():
+    # Two URLs that differ ONLY in tracking params collapse to one
+    html = ('<meta property="og:image" content="https://cdn.x.com/a.jpg?utm_source=a">'
+            '<meta property="og:image" content="https://cdn.x.com/a.jpg?utm_source=b&fbclid=1">')
+    urls = ddg_search.extract_fullsize_images(html, "https://example.com/")
+    assert len(urls) == 1
+    # Output keeps the NON-tracking URL form (tracking stripped, order kept)
+    assert urls[0] == "https://cdn.x.com/a.jpg"
+
+
+def test_extract_fullsize_images_keeps_signed_params():
+    html = ('<meta property="og:image" content="https://cdn.x.com/f.jpg?token=aaa&expires=999&sig=zzz">')
+    urls = ddg_search.extract_fullsize_images(html, "https://example.com/")
+    assert urls and urls[0] == "https://cdn.x.com/f.jpg?token=aaa&expires=999&sig=zzz"
+
+
+# --- consent cookie pre-set (WP-5.2 port) --------------------------------
+
+def test_consent_cookie_header_present():
+    h = consent_cookie_header("https://gallery.com/view/123")
+    assert h is not None
+    assert "over18=1" in h
+    assert "CookieConsent=true" in h
+    assert "gdpr_accepted=true" in h
+
+
+def test_consent_cookie_header_skips_proxies():
+    assert consent_cookie_header("https://r.jina.ai/https://gallery.com/x") is None
+    assert consent_cookie_header("https://duckduckgo.com/html/?q=x") is None
+    assert consent_cookie_header("https://html.duckduckgo.com/html/?q=x") is None
+
+
+def test_consent_cookie_header_fail_open():
+    assert consent_cookie_header("") is None
+    assert consent_cookie_header(None) is None
+
+
+def test_is_likely_content_page():
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "standalone"))
+    import orchestrator
+    assert orchestrator._is_likely_content_page("https://x.com/gallery/photo/123") is True
+    assert orchestrator._is_likely_content_page("https://x.com/threads/12345678") is True
+    assert orchestrator._is_likely_content_page("https://x.com/view/abc123") is True
+    assert orchestrator._is_likely_content_page("https://x.com/2024/03/15/post") is True
+    assert orchestrator._is_likely_content_page("https://x.com/about") is False
+    assert orchestrator._is_likely_content_page("https://x.com/") is False
+    assert orchestrator._is_likely_content_page("https://x.com/") is False

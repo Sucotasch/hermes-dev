@@ -242,3 +242,115 @@ def should_skip_junk_url(url: str) -> bool:
         if rx.search(full):
             return True
     return False
+
+
+# --- Segment-aware crawl-link classifier (ported from web-media-parser WP-1) --
+#
+# Path segments that almost never hold scrapeable content (legal, account,
+# commerce, corporate, noise). Matched as FULL path segments only — never as
+# free substrings, so "ad" can never kill "media" or "upload". This filter is
+# used BEFORE fetching: legal/login/privacy pages contain neither the queried
+# text content nor gallery images, so skipping them saves validation requests
+# and keeps them out of the report.
+DEFAULT_LINK_SKIP_SEGMENTS = frozenset({
+    # account / commerce
+    "login", "signin", "signup", "register", "logout", "account", "profile",
+    "cart", "checkout", "payment", "subscribe", "billing", "password", "auth",
+    "settings", "dashboard", "preferences", "admin",
+    # legal / corporate
+    "privacy", "privacy-policy", "terms", "tos", "legal", "copyright",
+    "dmca", "cookies", "cookie-policy", "gdpr", "imprint", "impressum",
+    "about", "about-us", "contact", "careers", "jobs", "press", "help",
+    "support", "faq", "feedback", "sitemap", "robots.txt",
+    # noise
+    "advert", "advertising", "ads", "adserver", "sponsor", "promo",
+    "newsletter", "unsubscribe", "widget", "embed", "share", "redirect",
+    "go", "out", "external", "tracking", "pixel", "analytics",
+    "wp-admin", "wp-login", "search",
+    # NOTE: tag/tags/category/categories are deliberately NOT here — galleries
+    # live under /tag/ and /category/ hubs on many platforms.
+})
+
+# Substrings only safe as a full path segment or query key — never free.
+_SKIP_QUERY_KEYS = frozenset({"utm_source", "utm_medium", "fbclid", "gclid"})
+
+# File junk that is never a page to deep-read (explicit, end-of-path only).
+_FILE_JUNK_SUFFIXES = (
+    ".css", ".js", ".map", ".xml", ".json", ".txt", ".ico",
+    ".woff", ".woff2", ".ttf", ".eot", ".svg", ".png", ".jpg", ".jpeg",
+    ".gif", ".webp", ".avif", ".mp4", ".webm", ".mp3",
+)
+
+# Host-level ad/tracker networks (matches _AD_HOST_SUFFIXES semantics).
+_AD_HOST_NETWORKS = (
+    "doubleclick.", "googlesyndication.", "googleadservices.", "adservice.",
+    "adnxs.", "taboola.", "outbrain.", "criteo.", "moatads.", "scorecardresearch.",
+)
+
+
+def _path_segments(url: str):
+    """Lowercased non-empty path segments of a URL."""
+    try:
+        path = urlparse(url).path.lower()
+    except Exception:
+        return []
+    return [s for s in path.split("/") if s]
+
+
+def should_skip_crawl_url(url: str, extra_stop_words=None) -> bool:
+    """True when a URL should not be fetched/queued for content parsing.
+
+    Precision-first: legal/account/noise paths are matched as whole path
+    segments, file junk as end-of-path suffixes, ad networks at host level.
+    `extra_stop_words` are added as segments (len>=3, stripped of '/').
+    Fail-open: any error returns False (never blocks content).
+    """
+    if not url or not isinstance(url, str):
+        return True
+    if _in_allowlist(url):
+        return False
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not p.scheme or not p.netloc:
+        return True
+    try:
+        path = (p.path or "").lower()
+        full = url.lower()
+
+        # Explicit file junk (end-of-path only — /media/uploads/1.jpg is a
+        # media file, not a page; skip it from PAGE candidates but this module
+        # also guards viewer-link discovery where we must never fetch binaries).
+        if path.endswith(_FILE_JUNK_SUFFIXES):
+            return True
+
+        # Host-level ad networks (dot-boundary prefix is safe: "doubleclick.").
+        if any(n in full for n in _AD_HOST_NETWORKS):
+            return True
+        if _host_matches_ad(url):
+            return True
+
+        # Segment match — the precise, false-positive-safe part.
+        skip = set(DEFAULT_LINK_SKIP_SEGMENTS)
+        if extra_stop_words:
+            for w in extra_stop_words:
+                w = (w or "").strip().lower().strip("/")
+                if len(w) >= 3:
+                    skip.add(w)
+        segs = _path_segments(url)
+        if any(s in skip for s in segs):
+            return True
+
+        # Tracking-only query keys: a URL whose ONLY query params are
+        # utm/fbclid/gclid is a marketing redirect, not content.
+        if p.query:
+            try:
+                keys = {k.split("=", 1)[0].lower() for k in p.query.split("&")}
+            except Exception:
+                keys = set()
+            if keys and keys <= _SKIP_QUERY_KEYS:
+                return True
+    except Exception:
+        return False
+    return False
