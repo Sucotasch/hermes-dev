@@ -222,6 +222,33 @@ def _dedup_key(url):
         return ""
 
 
+def _is_keyword_soup(url, query):
+    """SEO keyword-stuffing detector: path is query words joined by '+'.
+
+    The '+'-join pattern is an SEO-spam signature (bottomless+bikini+pics on
+    hundreds of throwaway domains). Real sites never join path words with '+',
+    so hyphenated legit URLs are untouched. Needs >=3 path tokens with a
+    majority matching query words — false-positive safe.
+    """
+    try:
+        from urllib.parse import urlparse
+        path = urlparse(url).path or ""
+        if "+" not in path:
+            return False
+        query_words = {w.lower() for w in re.findall(r"[a-z\u0430-\u044f\u0451]{3,}", query.lower())}
+        if len(query_words) < 2:
+            return False
+        tokens = [t.strip("/ ") for t in path.split("+") if t.strip("/ ")]
+        if len(tokens) < 2:
+            return False
+        hits = sum(1 for t in tokens if t.lower() in query_words)
+        if len(tokens) == 2:
+            return hits == 2  # strict for 2-token: every token is a query word
+        return hits >= max(2, len(tokens) // 2)
+    except Exception:
+        return False
+
+
 def _query_variants(query, query_type="general"):
     """Generate query variants based on query type."""
     SUFFIXES = {
@@ -806,6 +833,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
     search_urls = []
     video_urls = []
     service_urls = []
+    spam_urls = []
     kept_results = []
     _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
     _SEARCH_PATTERNS = ("/search", "/images/search", "search?q=", "search?s=", "/search/")
@@ -827,6 +855,10 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 search_urls.append(url)
             elif any(p in path for p in _SERVICE_PATHS):
                 service_urls.append(url)
+            elif _is_keyword_soup(url, query):
+                # SEO '+'-keyword stuffing (bottomless+bikini+pics on throwaway
+                # domains) — never real content, wastes the validation budget.
+                spam_urls.append(url)
             elif query_type != "video" and (
                 any(d in url_lower for d in _VIDEO_DOMAINS) or
                 any(p in url_lower for p in _VIDEO_PATH_PATTERNS)):
@@ -835,7 +867,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 kept_results.append(r)
     all_results = kept_results
     if log:
-        log(f"  After blocklist: {len(all_results)} kept, {len(blocked_urls)} blocked, {len(homepage_urls)} homepages, {len(search_urls)} search-URLs, {len(video_urls)} video, {len(service_urls)} service")
+        log(f"  After blocklist: {len(all_results)} kept, {len(blocked_urls)} blocked, {len(homepage_urls)} homepages, {len(search_urls)} search-URLs, {len(video_urls)} video, {len(service_urls)} service, {len(spam_urls)} keyword-soup")
         for u in blocked_urls:
             log(f"    BLOCKED: {u[:90]}")
         for u in homepage_urls:

@@ -873,3 +873,91 @@ used by tests); `$&` in `to` templates unsupported (same as source project).
 - Dead code cleanup (P1-15: unused `_search_*` strategies, `fetch_page`, `compose.py`, `synthesize_answer`, `VISUAL_ALLOWLIST`).
 - Thread-safety of shared curl_cffi sessions (P1-23), `verify=False` (P4), restore.ps1 process killing (P4).
 - Integration items INT-1..INT-5 from §14 (pending user decision).
+
+---
+
+## 15. Test-run analysis — `standalone/logs/research_2026-08-10_190748.log` (2026-08-10)
+
+Query: "Bikini girls image gallery, bottomless bikini pics, …" → `query_type: general`.
+Run: 383.8s total, 4 variants → 154 URLs → 132 kept → 100 validated → **18 alive**,
+12 dead, 67 blocked, 14 domain-blocked. Level-2: +10 pages. Deep-read: 4 pages,
+30 raw images → 10 unique (all from ONE junk SEO page). Evidence: 3 pages.
+
+### 15.1 Confirmed bugs (reproduced against code)
+
+**B1 — `_detect_blocked()` false-positives on the word "captcha" (ROOT CAUSE of 67/100 blocked).**
+Reproduced: `commons.wikimedia.org` and `scrolller.com` → HTTP 200, real HTML,
+but `blocked=True, error="blocked (captcha/cloudflare/etc)"` even with a working proxy
+(proxy verified alive: direct AND via-proxy curl both 200). The rule
+`'captcha' in html and '<form' in html → blocked` fires because MediaWiki pages
+carry `wgConfirmEditCaptchaNeededForGenericEdit:"hcaptcha"` in JS config + a search form.
+Any JS-heavy page mentioning captcha in config (WordPress/MediaWiki) is condemned.
+Domino effect: orchestrator's domain quarantine (2 blocks → skip whole domain)
+then banned `wikimedia.org`, `scrolller.com`, `shutterstock.com`, `dreamstime.com`
+etc. — 14 domains, several of them fully legitimate.
+Fix: require real challenge markers (cf-chl-*, challenge-platform, px-captcha,
+"verify you are human", hcaptcha iframe/widget, recaptcha+verify) instead of the
+bare word; drop the `'<form'` heuristic. Also drop `'страница не найдена'`
+(plain 404 text, not a block) from indicators.
+
+**B2 — Naive registrable-domain: "BLOCK DOMAIN: co.uk" and `_dedup_key`/`base_domain`.**
+`_validate_urls._base_domain` (orchestrator, ~line 315) and `_common.base_domain`
+take the last two labels → `markhewittphotography.co.uk` → `co.uk`; after 2 blocked
+`.co.uk` pages the whole TLD is quarantined (and dedup keys merge unrelated hosts).
+Same naive logic in `_dedup_key` and the wrapper's `_base_domain`. Affects
+`co.uk`, `co.za`, `com.au`, `co.jp`, `com.br`, …
+Fix: shared `registrable_domain()` in `_common.py` with a public-suffix table,
+used by orchestrator validation/dedup, wrapper, and junk filter `_third_party`.
+
+**B3 — Evidence/image relevance re-scored on truncated snippets (rel=1.00 → 0.00).**
+Deep-read: `telegra.ph` rel=1.00 (text=1.00, imgs=20, kw=✓), `autoadult` rel=1.00.
+Evidence selection (Step 9) and image gate (Step 8) recompute
+`content_relevance_score(query, snippet)` on `snippet[:500]` / DDG snippet instead
+of using the deep-read score → both pages drop to 0.00, are skipped from evidence,
+and their 20 images are discarded as "from irrelevant pages". Result: the report
+kept 10 images, ALL from the lowest-relevance page (`bringmetotheocean.ru` rel=0.44).
+Fix: store `p["deep_score"]` in `_deep_read_and_extract` and reuse it in Steps 8/9
+(keep the img_bonus logic consistent).
+
+**B4 — `&amp;` not unescaped in image URLs.**
+Log: `https://i0.wp.com/img.index.hu/…/BIG_0017096802.jpg&amp;ssl=1`. `extract_fullsize_images`
+returns raw attribute values; the literal `&amp;` breaks download and the markdown
+`![](...)` link. Fix: `html.unescape()` on extracted URLs before dedup/filter.
+
+**B5 — `vk.ru` missing from BLOCKED_DOMAINS** (`vk.com`/`ok.ru` present).
+`vk.ru/album-…` and `vk.ru/topic-…` passed the blocklist and were validated (HTTP 418).
+
+### 15.2 Quality issues (documented, product-level decisions)
+
+**Q1 — Query-type classification:** an explicit image-gallery query ("…image gallery,
+…bikini pics…") was classified `general`. Cascading cost: no img_bonus (validation
+logged `imgs=0` everywhere even for gallery pages), relevance thresholds 0.15
+instead of 0.05, no image size/dedup filter, no Gallery Links section, no visual
+allowlist (pinterest/flickr/imgur would have been kept). Worth a prompt/example
+review in `classify_query_type`.
+
+**Q2 — SEO "keyword-soup" spam in search results:** ~70/154 URLs are
+`bottomless+bikini+pics`-style keyword-stuffed pages across hundreds of throwaway
+domains. `junk_filter.is_ad_url` correctly does NOT block them (hosts aren't
+ad networks), but they waste the 100-slot validation budget. Consider a
+keyword-soup detector (path is mostly query words joined by `+`/`-`) at Step 3.
+
+**Q3 — Level-2 candidates quality:** 125 candidates → 16 alive → 10 added;
+15/16 alive were a single domain (`xxgasm.com`) and `xxgasm.com/report-abuse/`
+passed the expansion filter. Consider capping Level-2 per dedup key more tightly
+and adding utility-page paths to the junk-transition rules.
+
+**Q4 — Variant display:** all four variants print the same first 60 chars
+(`q[:60]`) — display-only, not a bug, but hides what actually differs.
+
+**Q5 — Leftover temp file `_tmp_replace_check_url_live.py` in repo root** — cleanup.
+
+### 15.3 What the run proves works
+
+Filters worked: 5 blocked (t.me/vk.com/ok.ru/facebook), 7 homepages, 7 search-URLs,
+2 video, 1 service — all correctly classified. Blocklist + homepage/search/service
+filtering is solid. `_check_url_live` HEAD→GET flow, binary-media guard, deferred
+503 handling, and relevance sorting all behaved as designed. Proxy itself was
+reachable (verified after the run); the 81/81 "proxy failed" markers were a side
+effect of B1 (nothing reached the proxy because direct pages already "looked
+blocked"), not a proxy outage.

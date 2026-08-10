@@ -250,7 +250,7 @@ def _detect_blocked(html):
     html_lower = html.lower()
     block_indicators = [
         'cf-chl-check', 'checking your browser',
-        'please verify you are human', 'access denied', 'forbidden',
+        'please verify you are human', 'access denied',
         '403 forbidden', '429 too many', '503 service unavailable',
         'challenge-platform', 'cdn-cgi',
         'browser left', 'attention required',
@@ -258,23 +258,29 @@ def _detect_blocked(html):
         'turn on javascript', 'enable cookies',
         'javascript is disabled', 'enable javascript and then reload',
         'you need to enable javascript', 'requires javascript',
-        # Russian regional blocks
+        # Russian regional blocks. NOTE: plain 404 texts ('страница не
+        # найдена') are NOT blocks and are intentionally absent.
         'данный контент недоступен', 'доступ к данной странице ограничен',
         'эта страница недоступна', 'контент заблокирован',
-        'доступ запрещён', 'страница не найдена',
+        'доступ запрещён',
         'доступ закрыт', 'доступ к информационному ресурсу ограничен',
         'информация на данной странице ограничена', 'ресурс заблокирован',
         'доступ временно ограничен', 'доступ приостановлен',
     ]
-    # Check for actual captcha forms (not just config mentions)
-    if 'captcha' in html_lower:
-        # Only flag if captcha appears in visible context, not JS config
-        if '<form' in html_lower and 'captcha' in html_lower:
-            return True
-        if 'please complete the captcha' in html_lower or 'enter the captcha' in html_lower:
-            return True
-        if 'hcaptcha' in html_lower and 'challenge' in html_lower:
-            return True
+    # Captcha: only REAL challenge pages, never mere mentions of the word.
+    # The old rule (word 'captcha' + any <form>) falsely condemned every
+    # MediaWiki/JS-heavy page — e.g. Commons pages carry
+    # wgConfirmEditCaptchaNeededForGenericEdit:"hcaptcha" in JS config plus
+    # a search form (observed: commons.wikimedia.org → blocked on HTTP 200).
+    if ('hcaptcha' in html_lower and
+            ('challenge' in html_lower or '<iframe' in html_lower or 'hcaptcha-widget' in html_lower)):
+        return True
+    if ('recaptcha' in html_lower and
+            ('verify' in html_lower or 'g-recaptcha' in html_lower)):
+        return True
+    if ('please complete the captcha' in html_lower or 'enter the captcha' in html_lower
+            or 'complete the captcha to continue' in html_lower):
+        return True
     for ind in block_indicators:
         if ind in html_lower:
             return True
@@ -1114,7 +1120,7 @@ BLOCKED_DOMAINS = {
     "market.yandex.ru", "travel.yandex.ru",
     "auto.ru", "dzen.ru",
     "e1.ru", "gismeteo.ru",
-    "vk.com", "ok.ru",
+    "vk.com", "vk.ru", "ok.ru",
     "allmovie.com",  # JS-blocked, returns minimal content
     # Generic portals (never contain specific topic info)
     # NOTE: images.yandex.ru is NOT blocked (useful for visual search)
@@ -1124,7 +1130,7 @@ BLOCKED_DOMAINS = {
     "market.yandex.ru", "travel.yandex.ru",
     "auto.yandex.ru", "dzen.ru",
     "e1.ru", "gismeteo.ru",
-    "vk.com", "ok.ru",
+    "vk.com", "vk.ru", "ok.ru",
     # Social media / professional networks (JS-blocked, internal routes)
     "linkedin.com", "facebook.com", "instagram.com", "twitter.com",
     "t.me",  # Telegram preview pages

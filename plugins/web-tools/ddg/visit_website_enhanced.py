@@ -215,15 +215,27 @@ def _is_blocked(html):
     if not html or len(html) < 100:
         return True
     text_lower = html.lower()
-    
+
+    # Captcha: only REAL challenge pages, never mere mentions of the word.
+    # MediaWiki/WordPress pages carry captcha settings in JS config + a search
+    # form; the bare-word rule falsely condemned them (observed: commons.
+    # wikimedia.org HTTP 200 classified as blocked).
+    if ('hcaptcha' in text_lower and
+            ('challenge' in text_lower or '<iframe' in text_lower or 'hcaptcha-widget' in text_lower)):
+        return True
+    if ('recaptcha' in text_lower and
+            ('verify' in text_lower or 'g-recaptcha' in text_lower)):
+        return True
+    if ('please complete the captcha' in text_lower or 'enter the captcha' in text_lower
+            or 'complete the captcha to continue' in text_lower):
+        return True
+
     blocks = [
         ('cf-chl-check', 'cloudflare_challenge'),
         ('checking your browser', 'cloudflare_challenge'),
-        ('captcha', 'captcha'),
         ('security check', 'security_check'),
         ('please verify you are human', 'human_verification'),
         ('access denied', 'access_denied'),
-        ('forbidden', 'access_denied'),
         ('403 forbidden', 'access_denied'),
         ('429 too many', 'rate_limited'),
         ('503 service unavailable', 'service_unavailable'),
@@ -237,13 +249,13 @@ def _is_blocked(html):
         ('enable javascript and then reload', 'js_required'),
         ('you need to enable javascript', 'js_required'),
         ('requires javascript', 'js_required'),
-        # Russian regional blocks
+        # Russian regional blocks. Plain 404 texts ('страница не найдена')
+        # are NOT blocks and are intentionally absent.
         ('данный контент недоступен', 'regional_block'),
         ('доступ к данной странице ограничен', 'regional_block'),
         ('эта страница недоступна', 'regional_block'),
         ('контент заблокирован', 'regional_block'),
         ('доступ запрещён', 'regional_block'),
-        ('страница не найдена', 'regional_block'),
         ('доступ закрыт', 'regional_block'),
         ('доступ к информационному ресурсу ограничен', 'regional_block'),
         ('информация на данной странице ограничена', 'regional_block'),
@@ -251,7 +263,7 @@ def _is_blocked(html):
         ('доступ временно ограничен', 'regional_block'),
         ('доступ приостановлен', 'regional_block'),
     ]
-    
+
     for pattern, block_type in blocks:
         if pattern in text_lower:
             return True
