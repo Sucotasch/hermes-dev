@@ -115,3 +115,110 @@ def test_2gis_rule():
     out = sieve.apply("https://i2.photo.2gis.ru/images/x_800x600.jpg", "https://2gis.ru/map")
     assert out.endswith(".jpg")
     assert "_800x600" not in out
+
+
+# --- INT-3: link->url->res chain (get_link_rule / apply_link_url_transform /
+#          extract_res_urls) — synthetic rules, no network ------------------
+
+def _rule(link, url, res):
+    import re as _re
+    rule = {"link": link, "url": url, "res": res}
+    try:
+        rule["_link_re"] = _re.compile(link, _re.IGNORECASE)
+    except _re.error:
+        pass
+    return rule
+
+
+class _FakeSieve:
+    """Minimal stand-in using the real methods via the real _Sieve class."""
+
+    def __init__(self, rules):
+        import sieve as _sieve
+        inst = _sieve._Sieve(path="__none__")
+        inst._link_rules = rules
+        self._inst = inst
+
+    def get_link_rule(self, url):
+        return self._inst.get_link_rule(url)
+
+    def apply_link_url_transform(self, rule, match, page_url=""):
+        return self._inst.apply_link_url_transform(rule, match, page_url)
+
+    def extract_res_urls(self, rule, html, **kw):
+        return self._inst.extract_res_urls(rule, html, **kw)
+
+
+def test_get_link_rule_matches_stripped_and_full():
+    fs = _FakeSieve([_rule(r"^imx\.to/([A-Za-z0-9]+)", "https://imx.to/$1", r"img src" )])
+    # matches scheme-stripped variant
+    found = fs.get_link_rule("https://imx.to/abc123")
+    assert found is not None
+    rule, match = found
+    assert match.group(1) == "abc123"
+    # non-matching host → None
+    assert fs.get_link_rule("https://other.com/x") is None
+    assert fs.get_link_rule("") is None
+
+
+def test_apply_link_url_transform_substitutes_and_prefixes():
+    rule = _rule(r"^ag\.ru/screenshots/(\w+/\d+)", "http://www.ag.ru/screenshots/$1", "")
+    fs = _FakeSieve([rule])
+    found = fs.get_link_rule("https://ag.ru/screenshots/game/42")
+    rule, match = found
+    out = fs.apply_link_url_transform(rule, match, "https://ag.ru/x")
+    assert out == ("http://www.ag.ru/screenshots/game/42", None)
+
+
+def test_apply_link_url_transform_descending_groups():
+    fs = _FakeSieve([])
+    # $10 is a REAL group here — descending replacement must apply $10 before
+    # $1, otherwise '$10' becomes 'aaa0'.
+    pattern = (r"^h/([a-z])/([a-z])/([a-z])/([a-z])/([a-z])/"
+               r"([a-z])/([a-z])/([a-z])/([a-z])/([a-z]+)$")
+    rule = _rule(pattern, "https://h/$10/$1", "")
+    m = __import__("re").search(pattern, "h/a/b/c/d/e/f/g/h/i/jk")
+    out = fs.apply_link_url_transform(rule, m)
+    assert out == ("https://h/jk/a", None)
+
+
+def test_apply_link_url_transform_post_data():
+    # Content after " :" is POSTed form data (source semantics: r"\s+:(.+)$").
+    rule = _rule(r"^imx\.to/(\w+)", "https://imx.to/full :imgContinue=$1", "")
+    fs = _FakeSieve([rule])
+    found = fs.get_link_rule("https://imx.to/abc")
+    out = fs.apply_link_url_transform(*found)
+    assert out == ("https://imx.to/full", "imgContinue=abc")
+
+
+def test_apply_link_url_transform_js_and_data_fail_open():
+    js_rule = _rule(r"^x\.com/(\w+)", ":return 'https://x/'+$[1]", "")
+    found = _FakeSieve([js_rule]).get_link_rule("https://x.com/abc")
+    assert found is not None
+    assert _FakeSieve([]).apply_link_url_transform(*found) is None
+    data_rule = _rule(r"^y\.com/(\w+)", "data:,$&", "")
+    found = _FakeSieve([data_rule]).get_link_rule("https://y.com/abc")
+    assert found is not None
+    assert _FakeSieve([]).apply_link_url_transform(*found) is None
+
+
+def test_extract_res_urls_regex_group1():
+    fs = _FakeSieve([])
+    rule = _rule("^h", "https://h/x", r"<td[^>]*style=\"background:url\(([^)]+)\)")
+    html = '<td style="background:url(https://cdn.example.com/full.jpg)">x</td>'
+    assert fs.extract_res_urls(rule, html) == ["https://cdn.example.com/full.jpg"]
+
+
+def test_extract_res_urls_js_res_skipped_then_img_fallback():
+    fs = _FakeSieve([])
+    rule = _rule("^h", "https://h/x", ":return $._.match(...)")
+    html = '<html><body><img src="//cdn.example.com/a.webp"><img src="https://c.example.com/b.png"></body></html>'
+    urls = fs.extract_res_urls(rule, html, page_url="https://h/viewer")
+    assert "https://cdn.example.com/a.webp" in urls
+    assert "https://c.example.com/b.png" in urls
+
+
+def test_extract_res_urls_empty_html():
+    fs = _FakeSieve([])
+    assert fs.extract_res_urls({}, "") == []
+    assert fs.extract_res_urls({}, "<p>no images</p>") == []

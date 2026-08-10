@@ -192,6 +192,10 @@ _PLATFORM_DOMAINS = {
     "forumhouse.ru", "pikabu.ru",
 }
 
+# INT-3 fullsize discovery: per-run time budget for resolving thumbnail
+# viewer pages (sieve link->url->res) — visual queries only, fail-open.
+_FULLSIZE_DISCOVER_BUDGET = 12.0
+
 # Utility/system path tokens never worth expanding into (Level-2 candidates):
 # report-abuse, login/register, privacy/terms, feeds, etc.
 # NOTE: only unambiguous system tokens. Content words like 'about'/'help'/
@@ -528,6 +532,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
     skipped_fetch = 0
     skipped_short = 0
     skipped_relevance = 0
+    _deep_read_start = time.monotonic()
     from urllib.parse import urlparse
 
     for p in pages[:top_n * 3]:
@@ -558,6 +563,25 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 continue
 
             imgs = ddg_search.extract_fullsize_images(raw_html, url)
+            if query_type == "visual":
+                # INT-3: resolve thumbnail-transition links (viewer pages such
+                # as imx.to / ag.ru) to fullsize originals via sieve link->url->
+                # res. Bounded: per-run time budget, <=3 concurrent fetches,
+                # per-URL timeout, and zero network when no `link` rule matches.
+                try:
+                    from discovery import discover_thumbnails
+                    pairs = ddg_search.extract_thumbnail_links(raw_html, url)
+                    if pairs:
+                        remaining = max(1.0, _FULLSIZE_DISCOVER_BUDGET - (
+                            time.monotonic() - _deep_read_start))
+                        resolved = discover_thumbnails(pairs, url, budget=remaining)
+                        extra = [u for urls in resolved.values() for u in urls]
+                        if extra:
+                            imgs = list(imgs) + extra
+                            if log:
+                                log(f"      fullsize discovery: {len(extra)} from {len(pairs)} links")
+                except Exception:
+                    pass
             text = _extract_main_content(raw_html)
             text = _clean_content(text)
 

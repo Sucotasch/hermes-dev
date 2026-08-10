@@ -122,6 +122,7 @@ $Files = @(
     @{ Repo = 'plugins\web-tools\ddg\_common.py'; Dest = 'plugins\web-tools\ddg\_common.py' }
     @{ Repo = 'plugins\web-tools\ddg\sieve.py'; Dest = 'plugins\web-tools\ddg\sieve.py' }
     @{ Repo = 'plugins\web-tools\ddg\junk_filter.py'; Dest = 'plugins\web-tools\ddg\junk_filter.py' }
+    @{ Repo = 'plugins\web-tools\ddg\discovery.py'; Dest = 'plugins\web-tools\ddg\discovery.py' }
     @{ Repo = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json'; Dest = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json' }
     @{ Repo = 'plugins\web-tools\ddg\resources\junk_allowlist.txt'; Dest = 'plugins\web-tools\ddg\resources\junk_allowlist.txt' }
     @{ Repo = 'CONTEXT.md'; Dest = 'CONTEXT.md' }
@@ -155,6 +156,7 @@ $Targets = @(
     @('plugins\web-tools\ddg\visit_website_enhanced.py', $false),
     @('plugins\web-tools\ddg\sieve.py', $false),
     @('plugins\web-tools\ddg\junk_filter.py', $false),
+    @('plugins\web-tools\ddg\discovery.py', $false),
     @('plugins\web-tools\ddg\_common.py', $false),
     @('hermes-agent\tools\ddg_search_tool.py', $false)
 )

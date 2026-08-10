@@ -1290,6 +1290,50 @@ _TRACKING_IMG_RE2 = re.compile(r'(?:pixel|track|1x1|spacer|blank|clear\.gif|anal
 _FULLSIZE_IMG_MAX = 20
 
 
+def extract_thumbnail_links(html, base_url=""):
+    """Extract (thumbnail_url, viewer_href) pairs from gallery <a><img> patterns.
+
+    Only pairs whose href is a VIEWER PAGE (not a direct image file) are
+    returned — those are the links the sieve `link` rules (INT-3 discovery)
+    can resolve to fullsize originals. Direct-image hrefs are already handled
+    by extract_fullsize_images. Returns list of (thumb_url, href) tuples.
+    """
+    if not html:
+        return []
+    pairs = []
+    seen = set()
+    parsed_base = urllib.parse.urlparse(base_url) if base_url else None
+
+    def _resolve(u):
+        u = (u or "").strip()
+        if not u:
+            return ""
+        if u.startswith("//"):
+            return "https:" + u
+        if u.startswith("/") and parsed_base:
+            return f"{parsed_base.scheme}://{parsed_base.netloc}{u}"
+        return u
+
+    for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>\s*<img[^>]+src="([^"]+)"', html, re.I):
+        href = _resolve(m.group(1))
+        src = _resolve(m.group(2))
+        if not href or not src:
+            continue
+        if not (href.startswith("http://") or href.startswith("https://")):
+            continue
+        if not (src.startswith("http://") or src.startswith("https://")):
+            continue
+        # Direct-image href → handled by extract_fullsize_images already
+        if re.search(r'\.(?:jpg|jpeg|png|webp|gif|avif)(?:[?#]|$)', href, re.I):
+            continue
+        key = (src, href)
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((src, href))
+    return pairs
+
+
 def upgrade_to_fullsize(url, source_url=""):
     """Try common patterns to upgrade a thumbnail URL to full-size.
 

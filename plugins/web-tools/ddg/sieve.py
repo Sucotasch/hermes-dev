@@ -23,6 +23,7 @@ import re
 import json
 import logging
 import threading
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,7 @@ class _Sieve:
         self._domain_rules = {}   # domain -> [rule]
         self._global_rules = []   # rules without a recognizable domain
         self._all_rules = []      # every rule (fallback scan when domain index misses)
+        self._link_rules = []     # rules with a usable `link` regex (INT-3 discovery)
         self._loaded = False
 
     def load(self):
@@ -325,6 +327,22 @@ class _Sieve:
                 self._domain_rules.setdefault(domain, []).append(rule_data)
             else:
                 self._global_rules.append(rule_data)
+
+        # Precompile `link` regexes once (globals first, then per-domain rules —
+        # same match order as the source project) for fast get_link_rule().
+        self._link_rules = []
+        ordered = list(self._global_rules)
+        for domain_rules in self._domain_rules.values():
+            ordered.extend(domain_rules)
+        for rule in ordered:
+            link_re = rule.get("link")
+            if not isinstance(link_re, str) or not link_re:
+                continue
+            try:
+                rule["_link_re"] = re.compile(link_re, re.I)
+            except re.error:
+                continue
+            self._link_rules.append(rule)
         logger.info(
             f"sieve: loaded {len(data)} rules from {os.path.basename(self._path)} "
             f"({regex} regex, {converted} JS-converted, {skipped} JS skipped DOM/complex)"
@@ -452,6 +470,127 @@ class _Sieve:
                 final_list.append(u)
                 seen.add(u)
         return final_list
+
+
+    # --- Sieve link->url->res chain (INT-3: thumbnail transitions) ----------
+    #
+    # Many sieve rules are not pure img+to transforms but page-fetch chains:
+    # match the `link` regex on a thumbnail's parent href, apply the `url`
+    # template (string transform; content after " :" is POSTed form data,
+    # e.g. imx.to 'imgContinue='), fetch that page, then extract the fullsize
+    # image via the rule's `res` regex(es) with an <img src> fallback. Only the
+    # STATIC subset is ported — JS `url`/`res` expressions (':' prefix) need
+    # the Deno DOM engine and fail open (return None / no match), exactly like
+    # the source project without its engine.
+
+    def get_link_rule(self, link_url):
+        """Find a sieve rule whose `link` regex matches the given URL.
+
+        Returns (rule_data, match_object) or None. Matches the scheme-stripped
+        URL first, then the full URL (extension behaviour).
+        """
+        if not link_url:
+            return None
+        stripped = re.sub(r"^https?://", "", link_url, flags=re.I)
+        for variant in (stripped, link_url):
+            for rule in self._link_rules:
+                compiled = rule.get("_link_re")
+                if compiled is None:
+                    continue
+                m = compiled.search(variant)
+                if m:
+                    return rule, m
+        return None
+
+    def apply_link_url_transform(self, rule, match, page_url=""):
+        """Build (fetch_url, post_data) from a rule's `url` template.
+
+        Substitutes $1..$n / $& from the regex match (descending order so $10
+        isn't corrupted by $1). Content after " :" becomes form POST data.
+        JS templates (':') and data: URLs return None (nothing to fetch).
+        Returns None when no fetchable transform exists (fail-open).
+        """
+        url_tpl = rule.get("url")
+        if not url_tpl or not isinstance(url_tpl, str):
+            return None
+        if url_tpl.lstrip().startswith(":"):
+            return None  # JS url needs the DOM engine — fail-open
+        post_match = re.search(r"\s+:(.+)$", url_tpl)
+        template = url_tpl[:post_match.start()] if post_match else url_tpl
+        post_data = post_match.group(1).strip() if post_match else None
+        result = template
+        for i in range(len(match.groups()), 0, -1):
+            placeholder = f"${i}"
+            if placeholder in result and match.group(i) is not None:
+                result = result.replace(placeholder, match.group(i))
+        if "$&" in result:
+            result = result.replace("$&", match.group(0) or "")
+        # POST data gets the same $n substitution (the source project left the
+        # raw '$1' in post_data — fixed here; static POST rules are rare but
+        # must send the real value, e.g. imx.to 'imgContinue=abc').
+        if post_data:
+            for i in range(len(match.groups()), 0, -1):
+                placeholder = f"${i}"
+                if placeholder in post_data and match.group(i) is not None:
+                    post_data = post_data.replace(placeholder, match.group(i))
+            if "$&" in post_data:
+                post_data = post_data.replace("$&", match.group(0) or "")
+        if not result:
+            return None
+        if result.startswith("data:"):
+            return None  # in-page data-URL shims are not real fetches
+        if result.startswith("//"):
+            result = "https:" + result
+        elif not result.startswith(("http://", "https://")):
+            result = "https://" + result
+        return result, post_data
+
+    def extract_res_urls(self, rule, html, page_url="", groups=None, href=""):
+        """Extract fullsize URLs from a linked page's HTML via `res` regexes.
+
+        Group 1 of each match is the URL. JS res expressions (':') need the DOM
+        worker — skipped fail-open. If no pattern yields results, falls back to
+        a plain <img src> scan filtered to photo extensions.
+        """
+        if not html:
+            return []
+        urls, seen = [], set()
+        res = rule.get("res")
+        patterns = res if isinstance(res, list) else [res]
+        for pat in patterns:
+            if not pat or not isinstance(pat, str):
+                continue
+            if pat.lstrip().startswith(":"):
+                continue  # JS res needs DOM — skipped
+            try:
+                for m in re.finditer(pat, html, re.I):
+                    if m.lastindex and m.group(1):
+                        u = m.group(1)
+                        if u.startswith("//"):
+                            u = "https:" + u
+                        elif not u.startswith("http"):
+                            u = urljoin(page_url or "", u)
+                        if u.startswith(("http://", "https://")) and u not in seen:
+                            seen.add(u)
+                            urls.append(u)
+            except re.error:
+                continue
+            if urls:
+                break
+        if not urls:
+            for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.I):
+                u = m.group(1)
+                if u.startswith("//"):
+                    u = "https:" + u
+                elif not u.startswith("http"):
+                    u = urljoin(page_url or "", u)
+                # png added: the source project's fallback regex omitted it,
+                # but png is a core gallery format and must not be lost.
+                if (u.startswith("http") and u not in seen and
+                        re.search(r"\.(jpe?g|png|webp|avif|heic|bmp|tiff?)$", u, re.I)):
+                    seen.add(u)
+                    urls.append(u)
+        return urls
 
 
 _SINGLETON = None
