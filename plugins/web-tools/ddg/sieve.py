@@ -313,8 +313,11 @@ class _Sieve:
                     rule_data["to_callable"] = callable_fn
                     converted += 1
                 else:
-                    skipped += 1  # needs DOM or too complex — fail-open skip
-                    continue
+                    # No img transform (needs DOM/too complex) — but the rule
+                    # may still hold a STATIC link->url->res chain for INT-3
+                    # discovery, so keep it in _all_rules (NOT continue-dropped;
+                    # _try_rule skips rules without to_callable/to_python).
+                    skipped += 1
             elif isinstance(to_rule, str) and to_rule:
                 rule_data["to_python"] = _sanitize_imagus_target(to_rule)
                 regex += 1

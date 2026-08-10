@@ -981,10 +981,21 @@ blocked"), not a proxy outage.
 | Q3 Level-2 pre-filter: utility-path tokens + dedup-key cap (2/domain) before validation | ✅ | `c54dab9` |
 | Dead code: `synthesize_answer` removed; `_search_*`/`compose`/`fetch_page`/`image_search`/`VISUAL_ALLOWLIST` KEPT (reachable via CLI/tests/search_deep — not dead) | ✅ | `c54dab9` |
 
-Tests: 83/83 pass (75 prior + 8 new: registrable-domain incl. IPv4, detect_blocked
-precision incl. cdn-cgi, unescape). All modules py_compile clean. Still open
-(product decisions): INT-3 fullsize discovery chain (extra network fetches),
-NEW-8 report size cap.
+Tests: 98/98 pass (83 prior + 15 new: sieve link-rule methods, discovery module,
+extract_thumbnail_links). All modules py_compile clean. Still open (product
+decisions): NEW-8 report size cap.
+
+**INT-3 fullsize discovery implemented** (`09d380e`, user OK to return to
+integration): `sieve.py` gained `get_link_rule`/`apply_link_url_transform`/
+`extract_res_urls` (precompiled link regexes, static-only, JS fail-open) and the
+new `discovery.py` provides budgeted network resolution (`discover_fullsize`
+single-shot fetch, `discover_thumbnails` with time budget + ≤3 concurrency).
+Hooked into `_deep_read_and_extract` for `query_type == "visual"` only, bounded
+by `_FULLSIZE_DISCOVER_BUDGET` (12s/run), zero network when no `link` rule
+matches. `extract_thumbnail_links` collects `<a href><img>` viewer-page pairs.
+Two source fixes while porting: `png` added to the `<img>` fallback regex
+(source omitted it); `$n` substitution now also applies to POST data.
+`restore.ps1` copies discovery.py. 98/98 tests green, review pending.
 
 Code-review findings applied (`6732116`): (1) Level-2 utility-path filter narrowed
 to unambiguous system tokens AND first-path-segment only (content words like

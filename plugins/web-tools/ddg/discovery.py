@@ -106,30 +106,37 @@ def discover_thumbnails(pairs, page_url="", budget=_BUDGET_DEFAULT,
         return {}
     deadline = time.monotonic() + max(0.5, budget)
     out = {}
+    href_cache = {}  # viewer href -> [urls] (avoid re-fetching the same page)
     executor = ThreadPoolExecutor(max_workers=_CONCURRENCY)
-    pending = []  # (thumb, future)
+    pending = []  # (thumb, href, future)
 
-    def _collect(t, fut):
+    def _collect(t, h, fut):
+        urls = []
         try:
             wait = max(0.3, deadline - time.monotonic())
             urls = fut.result(timeout=wait)
-            if urls:
-                out[t] = urls
         except Exception:
-            pass
+            urls = []
+        if urls:
+            out[t] = urls
+        href_cache[h] = urls or []
 
     try:
         for thumb, href in pairs:
             if time.monotonic() >= deadline:
                 break
+            if href in href_cache:
+                if href_cache[href]:
+                    out[thumb] = href_cache[href]
+                continue
             if len(pending) >= _CONCURRENCY:
-                t, fut = pending.pop(0)
-                _collect(t, fut)
-            pending.append((thumb, executor.submit(discover_fullsize, href, page_url, fetch)))
-        for t, fut in pending:
+                t, h, fut = pending.pop(0)
+                _collect(t, h, fut)
+            pending.append((thumb, href, executor.submit(discover_fullsize, href, page_url, fetch)))
+        for t, h, fut in pending:
             if time.monotonic() >= deadline:
                 break
-            _collect(t, fut)
+            _collect(t, h, fut)
     finally:
         executor.shutdown(wait=False)  # never block the pipeline on stragglers
     return out

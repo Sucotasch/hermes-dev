@@ -577,7 +577,10 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                         resolved = discover_thumbnails(pairs, url, budget=remaining)
                         extra = [u for urls in resolved.values() for u in urls]
                         if extra:
-                            imgs = list(imgs) + extra
+                            # PREPEND: discovered originals are higher quality
+                            # than the primary extraction and must survive the
+                            # imgs[:max_imgs_per_page] slice below.
+                            imgs = list(extra) + list(imgs)
                             if log:
                                 log(f"      fullsize discovery: {len(extra)} from {len(pairs)} links")
                 except Exception:
