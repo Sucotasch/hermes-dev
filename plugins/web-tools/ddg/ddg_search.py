@@ -1911,7 +1911,26 @@ def _should_filter_url(url, query_type=None):
         return True
     if query_type != "video" and _is_video_url(url_lower):
         return True
-    # Ad/tracker hosts + junk transitions (forum chrome, login/register, etc.)
+    # Ad/tracker hosts (precision-first, allowlist-aware). Junk-transition
+    # rules (forum chrome, login/register) are NOT applied here — search
+    # results are content pages, not crawl links; those rules belong in the
+    # Level-2 expansion path (see _filter_expansion_url).
+    try:
+        from junk_filter import is_ad_url
+        if is_ad_url(url):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _filter_expansion_url(url):
+    """Filter Level-2 expansion candidates: ad/tracker hosts + junk transitions.
+
+    Unlike _should_filter_url (search results), expansion candidates come from
+    page links where forum chrome (search.php, member.php, wp-admin, viewfull,
+    login/register) is genuinely useless.
+    """
     try:
         from junk_filter import is_ad_url, should_skip_junk_url
         if is_ad_url(url) or should_skip_junk_url(url):

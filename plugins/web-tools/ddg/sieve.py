@@ -22,6 +22,7 @@ import os
 import re
 import json
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -345,10 +346,16 @@ class _Sieve:
         return rules
 
     def _try_rule(self, rule, url_variations, url, results):
-        """Apply one sieve rule; returns True when a match was found (transformed or not)."""
+        """Apply one sieve rule; returns True when a usable transform was appended.
+
+        Matches like the original (which accumulates results from ALL matching
+        rules): a rule that matches but produces no new URL must NOT stop the
+        scan — a later rule may hold the real fullsize transform.
+        """
         img_regex = rule.get("img", "")
         if not img_regex:
             return False
+        transformed = False
         for v_url in url_variations:
             match = re.search(img_regex, v_url, re.I)
             if not match:
@@ -369,13 +376,14 @@ class _Sieve:
                                 variant = f"{scheme}://{variant}"
                             if variant != url:
                                 results.append(variant)
-                    return True
+                                transformed = True
+                    break
                 except Exception:
-                    return True
+                    break
 
             to_pattern = rule.get("to_python", "")
             if not to_pattern:
-                return True  # matched but no usable transform — stop scanning this URL
+                continue
             try:
                 substituted = re.sub(
                     img_regex,
@@ -390,8 +398,9 @@ class _Sieve:
                 substituted = f"{scheme}://{substituted}"
             if substituted != url:
                 results.extend(_expand_variants(substituted))
-            return True
-        return False
+                transformed = True
+            break
+        return transformed
 
     def transform_candidates(self, url, source_url=""):
         """Return a deduplicated list of candidate URLs: [original, ...transformed].
@@ -400,6 +409,8 @@ class _Sieve:
         Applies: sieve img+to rules (regex + JS-converted) — domain-indexed
         first for speed, then a full fallback scan for rules whose extracted
         domain was imprecise; then the global WordPress size-suffix strip.
+        Unlike a first-match-wins design, ALL matching rules contribute their
+        candidates (matching the original SitePatternManager behavior).
         """
         results = [url]
         url_variations = [url]
@@ -408,23 +419,22 @@ class _Sieve:
 
         # Fast path: domain-indexed + global rules only
         indexed = self._rules_for(source_url or url) + self._rules_for(url)
-        matched = False
+        any_transformed = False
         for rule in indexed:
             try:
                 if self._try_rule(rule, url_variations, url, results):
-                    matched = True
-                    break
+                    any_transformed = True
             except Exception:
                 continue
 
         # Fallback: full scan (rules whose regex-embedded domain was imprecise,
-        # e.g. 'photo.2gis' vs host 'i2.photo.2gis.ru'). Only when nothing matched.
-        if not matched and len(self._all_rules) != len(indexed):
+        # e.g. 'photo.2gis' vs host 'i2.photo.2gis.ru'). Only when the fast path
+        # produced nothing.
+        if not any_transformed and len(self._all_rules) != len(indexed):
             for rule in self._all_rules:
                 try:
                     if self._try_rule(rule, url_variations, url, results):
-                        matched = True
-                        break
+                        any_transformed = True
                 except Exception:
                     continue
 
@@ -445,13 +455,18 @@ class _Sieve:
 
 
 _SINGLETON = None
+_LOCK = threading.Lock()
 
 
 def _get_sieve():
+    """Thread-safe lazy singleton (first call may come from a pool worker)."""
     global _SINGLETON
     if _SINGLETON is None:
-        _SINGLETON = _Sieve()
-        _SINGLETON.load()
+        with _LOCK:
+            if _SINGLETON is None:
+                inst = _Sieve()
+                inst.load()
+                _SINGLETON = inst
     return _SINGLETON
 
 

@@ -889,6 +889,14 @@ def run_deep_research(query, server_url="http://localhost:8888",
                             any(d in href_lower for d in _VIDEO_DOMAINS) or
                             any(p in href_lower for p in _VIDEO_PATH_PATTERNS)):
                             continue
+                        # Ad/tracker hosts + junk transitions (forum chrome) for
+                        # expansion candidates (page links, not search results).
+                        try:
+                            from junk_filter import is_ad_url, should_skip_junk_url
+                            if is_ad_url(href) or should_skip_junk_url(href):
+                                continue
+                        except Exception:
+                            pass
                         seen_urls.add(href)
                         level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
             except Exception:

@@ -823,6 +823,46 @@ stack, downloader/GUI — different architecture; porting costs exceed value for
 2. INT-1: use the newest sieve file (2026.07.15, 823 rules) as the shipped default?
 3. INT-3: OK to add extra network fetches for visual queries only?
 
+### 14.4 Implementation status (2026-08-10)
+
+User decision: implement **INT-1 + INT-2 + INT-4 + INT-5** with the newest sieve file
+(2026.07.15, 823 rules). INT-3 (link→url→res, extra network fetches) was left
+unimplemented — documented as pending decision. Commit `71d1fdf` (+ review follow-up):
+
+- **`sieve.py`** (new, ~430 LOC): Imagus static engine ported from `site_pattern_manager.py`
+  — sieve JSON loading (domain-indexed + global + full fallback scan), `img`+`to` regex
+  substitution, JS→Python callable converter (no Deno; ~336/823 rules usable, 158 JS-skipped
+  fail-open), `#ext#` expansion, WordPress size-suffix strip, fail-open on missing file,
+  thread-safe lazy singleton. Wired into `upgrade_to_fullsize(url, source_url)` in BOTH
+  `ddg_search.py` and `visit_website_enhanced.py` (applied last, heuristics as fallback);
+  orchestrator passes `source`/`source_page`.
+- **`junk_filter.py`** (new): precision-first ad/tracker classifier (host suffix + path token +
+  weak banner-size signal + allowlist file + fail-open), ported unchanged. `is_ad_url` in
+  `_should_filter_url` (search results) and `_filter_images_for_report` (pre-download);
+  `should_skip_junk_url` (forum chrome) in Level-2 expansion only (orchestrator + wrapper
+  `_safe_expand`) — NOT on search results (review finding #3).
+- **`_common.py`** (new): `normalize_url` (strip utm/fbclid/gclid, sort query, drop fragment,
+  collapse repeated path segments) + `base_domain`. Used for orchestrator `seen_urls` dedup
+  and wrapper per-source quota (replaces local `_base_domain` copy).
+- **`_check_url_live`**: `_parse_retry_after` (429 backoff, seconds or HTTP-date, bounded) +
+  binary Content-Type guards (skip HTML parse for image/video/audio payloads).
+- **`extract_fullsize_images`** (both copies): data-* attributes sorted so hi-res hints
+  (data-hi-res-src/data-fullsize/data-maxres/data-original/…) win the later dedup.
+- **`restore.ps1`**: copies `sieve.py`, `junk_filter.py`, `_common.py`, sieve JSON,
+  `junk_allowlist.txt`; compile-checks the new modules.
+- **Tests**: `test_sieve.py` (17), `test_junk_filter.py` (15), `test_common.py` (10) —
+  **75/75 pass** across all suites, all modules py_compile clean. Network smoke OK.
+
+Review findings applied (commit `71d1fdf` follow-up): (1) `transform_candidates` now
+accumulates candidates from ALL matching rules instead of stop-on-first-match;
+(2) `_common.base_domain` wired into the wrapper (no dead code); (3) junk-transition
+rules moved out of `_should_filter_url` into Level-2 expansion only; (4) thread-safe
+sieve singleton init.
+
+Open (not implemented): INT-3 fullsize discovery chain (needs user OK for extra
+network fetches on visual queries); unused `sieve.candidates()` public API (kept,
+used by tests); `$&` in `to` templates unsupported (same as source project).
+
 ---
 
 ### 14.4 Remaining open items (from §11 / §8 / §14)

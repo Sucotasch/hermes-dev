@@ -98,6 +98,16 @@ def _safe_expand(source_urls, query, max_new_links=25):
             if href.startswith("//"):
                 href = "https:" + href
 
+            # Ad/tracker hosts + junk transitions (forum chrome, login/register,
+            # wp-admin, viewfull…) — expansion candidates are page links where
+            # these are genuinely useless. Allowlist-aware, fail-open.
+            try:
+                from junk_filter import is_ad_url, should_skip_junk_url
+                if is_ad_url(href) or should_skip_junk_url(href):
+                    continue
+            except Exception:
+                pass
+
             if href in uniq:
                 continue
 
@@ -323,11 +333,14 @@ def _apply_post_retrieval_filter(evidence, query, final_limit=80):
     max_per_source_url = 4
     jaccard_threshold = 0.85
 
-    def _base_domain(url):
-        from urllib.parse import urlparse
-        host = (urlparse(url or "").hostname or "").lower()
-        parts = host.split(".")
-        return ".".join(parts[-2:]) if len(parts) > 2 else host
+    try:
+        from _common import base_domain as _base_domain
+    except Exception:
+        def _base_domain(url):
+            from urllib.parse import urlparse
+            host = (urlparse(url or "").hostname or "").lower()
+            parts = host.split(".")
+            return ".".join(parts[-2:]) if len(parts) > 2 else host
 
     accepted = []
     accepted_sets = []
