@@ -48,7 +48,7 @@ def classify_query_type(query, server_url="http://localhost:8888", model="local"
     """
     system = """You are a search intent classifier. Given a user query, output ONLY
 one word from this list: person, visual, technical, news, historical, comparison,
-fact, art, education, science, general.
+fact, art, education, science, video, general.
 
 - person: biography, career, filmography, aliases, personal life of a specific person
 - visual: images, photos, galleries, portraits, design, wallpapers
@@ -60,6 +60,7 @@ fact, art, education, science, general.
 - art: paintings, artists, art history, galleries, exhibitions, creative works
 - education: tutorials, courses, learning, textbooks, academic
 - science: physics, chemistry, biology, research, discoveries, experiments
+- video: video content, clips, footage, streaming, trailers, gameplay videos
 - general: everything else"""
 
     response = chat_completion([
@@ -70,9 +71,11 @@ fact, art, education, science, general.
     if response:
         response = response.strip().lower()
         valid = ["person", "visual", "technical", "news", "historical", "comparison",
-                 "fact", "art", "education", "science", "general"]
-        if response in valid:
-            return response
+                 "fact", "art", "education", "science", "video", "general"]
+        # Models sometimes prefix/suffix extra words — match the first valid token.
+        for token in response.split():
+            if token in valid:
+                return token
     return "general"
 
 

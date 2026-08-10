@@ -495,7 +495,7 @@ def image_search(query, page=1, count=10, region="wt-wt", safe="moderate"):
     """
     try:
         # Use Jina to fetch Bing image search
-        jina_url = f"https://r.jina.ai/https://www.bing.com/images/search?q={urllib.parse.quote(query)}&qft=+filterui:images-16by9"
+        jina_url = f"https://r.jina.ai/https://www.bing.com/images/search?q={urllib.parse.quote(query)}"
         jina_html = _fetch(jina_url, "document")
         
         if not jina_html or not _is_valid_content(jina_html):
@@ -663,7 +663,9 @@ def web_search(query, page=1, count=5, region="wt-wt", safe="auto"):
                     continue
                 text = (item.get("title", "") + " " + item.get("body", "")).lower()
                 matches = sum(1 for w in query_words if w in text)
-                if matches >= 2:
+                # Single-word queries must not require 2 word matches to keep DDGS coverage
+                min_matches = 2 if len(query_words) >= 2 else 1
+                if matches >= min_matches:
                     ddgs_results.append({"title": item.get("title", ""), "url": href, "snippet": item.get("body", "")})
             # Merge: engines first, then DDGS (deduplicated)
             seen = set()
@@ -1634,157 +1636,126 @@ def _check_url_live(url, timeout=10):
         result["error"] = "no session"
         return result
 
-    proxy_session = None
+    def _proxy_retry(method="head"):
+        """One proxy attempt; returns (status_code, body_or_None) or None."""
+        if not (USE_PROXY and PROXY_URL):
+            return None
+        try:
+            import curl_cffi
+            ps = curl_cffi.requests.Session(
+                impersonate=random.choice(IMPERSONATE_POOL),
+                proxies={"http": PROXY_URL, "https": PROXY_URL},
+                verify=False, timeout=timeout,
+            )
+            resp = getattr(ps, method)(url, timeout=timeout, allow_redirects=True)
+            if resp.status_code < 400:
+                return resp.status_code, getattr(resp, "text", "") or None
+        except Exception:
+            pass
+        return None
 
-    try:
-        head_resp = session.head(url, timeout=timeout, allow_redirects=True)
-        result["status"] = head_resp.status_code
-        result["content_type"] = head_resp.headers.get("content-type", "")[:200]
-        cl = head_resp.headers.get("content-length", "0")
-        result["content_length"] = int(cl) if cl.isdigit() else 0
-
-        # Hard error / block — try proxy retry for retryable statuses
-        if result["status"] in (403, 429, 451, 503):
-            if USE_PROXY and PROXY_URL:
-                try:
-                    import curl_cffi
-                    proxy_session = curl_cffi.requests.Session(
-                        impersonate=random.choice(IMPERSONATE_POOL),
-                        proxies={"http": PROXY_URL, "https": PROXY_URL},
-                        verify=False, timeout=timeout,
-                    )
-                    # For 503: try GET (not HEAD) — some servers return 503 on HEAD but 200 on GET
-                    if result["status"] == 503:
-                        proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
-                    else:
-                        proxy_resp = proxy_session.head(url, timeout=timeout, allow_redirects=True)
-                    if proxy_resp.status_code < 400:
-                        result["status"] = proxy_resp.status_code
-                        result["blocked"] = False
-                        result["proxy_used"] = True
-                except Exception:
-                    pass
-            # For 503: retry once after short delay (server may recover)
-            if result["status"] == 503 and result.get("blocked") is not False:
-                try:
-                    time.sleep(2)
-                    retry_resp = session.get(url, timeout=timeout, allow_redirects=True)
-                    if retry_resp.status_code < 400:
-                        result["status"] = retry_resp.status_code
-                        result["blocked"] = False
-                        # Store body from retry to avoid re-fetch
-                        result["body"] = retry_resp.text
-                except Exception:
-                    pass
-            if result.get("blocked") is False:
-                pass  # proxy retry succeeded
-            else:
-                result["blocked"] = True
-                result["error"] = f"HTTP {result['status']}"
-                return result
-        elif result["status"] in (404, 405, 410, 500, 502, 504):
-            result["error"] = f"HTTP {result['status']}"
-            return result
-
-        if result["status"] >= 400:
-            result["error"] = f"HTTP {result['status']}"
-            return result
-
-        # Header-based bot detection (fast fail before GET)
-        server = head_resp.headers.get("server", "").lower()
-        cf_headers = ["cf-ray", "cf-mitigated", "x-amz-cf-id"]
-        if "cloudflare" in server or any(h in head_resp.headers for h in cf_headers):
-            if result["status"] in (403, 503):
-                # Cloudflare challenge on HEAD — skip GET, go straight to proxy retry
-                pass  # fall through to proxy retry below
-
-    except Exception as e:
-        result["error"] = str(e)
-        return result
-
-    # 2xx/3xx only — fetch body
-    try:
-        body_resp = session.get(url, timeout=timeout, allow_redirects=True)
-        result["status"] = body_resp.status_code
-        result["content_type"] = body_resp.headers.get("content-type", "")[:200]
-        cl = body_resp.headers.get("content-length", "0")
-        result["content_length"] = max(result["content_length"], int(cl) if cl.isdigit() else 0)
-
-        if result["status"] >= 400:
-            result["error"] = f"HTTP {result['status']}"
-            return result
-
-        raw = body_resp.text
-
-        if _detect_blocked(raw):
-             # Retry with proxy if available
-             if USE_PROXY and PROXY_URL:
-                 try:
-                     import curl_cffi
-                     proxy_session = curl_cffi.requests.Session(
-                         impersonate=random.choice(IMPERSONATE_POOL),
-                         proxies={"http": PROXY_URL, "https": PROXY_URL},
-                         verify=False, timeout=timeout,
-                     )
-                     proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
-                     if proxy_resp.status_code < 400 and not _detect_blocked(proxy_resp.text):
-                         raw = proxy_resp.text
-                         result["blocked"] = False
-                         result["error"] = None
-                         result["proxy_used"] = True
-                 except Exception:
-                     pass
-             if result.get("blocked") or _detect_blocked(raw):
-                 result["blocked"] = True
-                 result["error"] = "blocked (captcha/cloudflare/etc)"
-                 return result
-
+    def _finalize(raw):
+        """Set body/text metrics; returns True when the page counts as alive."""
         result["body"] = raw
-        text = re.sub(r'<[^>]+>', ' ', raw)
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r"<[^>]+>", " ", raw)
+        text = re.sub(r"\s+", " ", text).strip()
         result["text_length"] = len(text)
-        result["text_words"] = len(re.findall(r'\w+', text))
-
+        result["text_words"] = len(re.findall(r"\w+", text))
         if result["text_length"] < 500 or result["text_words"] < 50:
             result["error"] = "empty or too-small page"
-            return result
-
+            return False
         result["alive"] = True
+        return True
+
+    # Phase 1: HEAD (fast fail for dead/blocked)
+    try:
+        head_resp = session.head(url, timeout=timeout, allow_redirects=True)
+    except Exception as e:
+        err = str(e)
+        result["error"] = err
+        # Dead site (DNS/timeout): proxy GET as last resort (was unreachable)
+        if any(k in err.lower() for k in
+               ["getaddrinfo", "timeout", "failed to resolve", "name or service"]):
+            pr = _proxy_retry("get")
+            if pr and pr[1] and not _detect_blocked(pr[1]):
+                result["status"] = pr[0]
+                if _finalize(pr[1]):
+                    result["proxy_used"] = True
         return result
 
+    result["status"] = head_resp.status_code
+    result["content_type"] = head_resp.headers.get("content-type", "")[:200]
+    cl = head_resp.headers.get("content-length", "0")
+    result["content_length"] = int(cl) if cl.isdigit() else 0
+    status = result["status"]
+
+    # Phase 2: hard statuses — proxy retry, else mark blocked/dead
+    if status in (403, 429, 451, 503):
+        pr = _proxy_retry("get" if status == 503 else "head")
+        if pr:
+            result["status"] = pr[0]
+            result["proxy_used"] = True
+            if status == 503 and pr[1]:
+                # Proxy GET already returned the body — finalize directly
+                if not _detect_blocked(pr[1]) and _finalize(pr[1]):
+                    return result
+                result["blocked"] = True
+                result["error"] = "blocked (captcha/cloudflare/etc)"
+                return result
+            # 403/429/451 recovered via proxy HEAD → fall through to direct GET below
+        elif status == 503:
+            # Server may have recovered — one direct GET retry after a short delay
+            try:
+                time.sleep(2)
+                retry_resp = session.get(url, timeout=timeout, allow_redirects=True)
+                if retry_resp.status_code < 400 and not _detect_blocked(retry_resp.text):
+                    result["status"] = retry_resp.status_code
+                    result["body"] = retry_resp.text
+                    if _finalize(retry_resp.text):
+                        return result
+            except Exception:
+                pass
+            result["blocked"] = True
+            result["error"] = f"HTTP {status}"
+            return result
+        else:
+            # Hard block, proxy failed or disabled → now marked blocked correctly
+            result["blocked"] = True
+            result["error"] = f"HTTP {status}"
+            return result
+    elif status in (404, 405, 410, 500, 502, 504) or status >= 400:
+        result["error"] = f"HTTP {status}"
+        return result
+
+    # Phase 3: 2xx/3xx — GET body
+    try:
+        body_resp = session.get(url, timeout=timeout, allow_redirects=True)
     except Exception as e:
         result["error"] = str(e)
         return result
+    result["status"] = body_resp.status_code
+    result["content_type"] = body_resp.headers.get("content-type", "")[:200]
+    cl2 = body_resp.headers.get("content-length", "0")
+    result["content_length"] = max(result["content_length"], int(cl2) if cl2.isdigit() else 0)
+    if result["status"] >= 400:
+        result["error"] = f"HTTP {result['status']}"
+        return result
 
-    # Proxy retry for dead sites (DNS/timeout errors only, not JS/captcha)
-    if not result["alive"] and not result.get("blocked") and USE_PROXY and PROXY_URL:
-        error = result.get("error", "")
-        if any(k in error.lower() for k in ["getaddrinfo", "timeout", "failed to resolve", "name or service"]):
-            try:
-                import curl_cffi
-                proxy_session = curl_cffi.requests.Session(
-                    impersonate=random.choice(IMPERSONATE_POOL),
-                    proxies={"http": PROXY_URL, "https": PROXY_URL},
-                    verify=False, timeout=timeout,
-                )
-                proxy_resp = proxy_session.get(url, timeout=timeout, allow_redirects=True)
-                if proxy_resp.status_code < 400:
-                    raw = proxy_resp.text
-                    if raw and not _detect_blocked(raw) and len(raw) > 500:
-                        result["status"] = proxy_resp.status_code
-                        result["body"] = raw
-                        text = re.sub(r'<[^>]+>', ' ', raw)
-                        text = re.sub(r'\s+', ' ', text).strip()
-                        result["text_length"] = len(text)
-                        result["text_words"] = len(re.findall(r'\w+', text))
-                        if result["text_length"] >= 500 and result["text_words"] >= 50:
-                            result["alive"] = True
-                            result["error"] = None
-                            result["proxy_used"] = True
-                            return result
-            except Exception:
-                pass
+    raw = body_resp.text
+    if _detect_blocked(raw):
+        pr = _proxy_retry("get")
+        if pr and pr[1] and not _detect_blocked(pr[1]):
+            raw = pr[1]
+            result["status"] = pr[0]
+            result["blocked"] = False
+            result["error"] = None
+            result["proxy_used"] = True
+        if _detect_blocked(raw):
+            result["blocked"] = True
+            result["error"] = "blocked (captcha/cloudflare/etc)"
+            return result
 
+    _finalize(raw)
     return result
 
 
@@ -1844,6 +1815,36 @@ def content_relevance_score(query, text):
     multi_hit = sum(1 for w in query_words if text_lower.count(w) >= 3)
     base_score += (multi_hit / len(query_words)) * 0.2
     return min(base_score, 1.0)
+
+
+# ── URL filtering (homepage / search / video) ───────────────────────────────
+_HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
+_SEARCH_PATTERNS = ("search?q=", "search?s=", "/images/search", "/search/", "/search?")
+_VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "rutube", "yandex.ru/video", "dzen.ru/video",
+                  "vimeo.com", "tiktok.com")
+_VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
+
+
+def _is_video_url(url):
+    """True if the URL points to video content (domain or path pattern)."""
+    url_lower = (url or "").lower()
+    return (any(d in url_lower for d in _VIDEO_DOMAINS) or
+            any(p in url_lower for p in _VIDEO_PATH_PATTERNS))
+
+
+def _should_filter_url(url, query_type=None):
+    """Drop homepages, search result pages, and (for non-video queries) video URLs."""
+    try:
+        parsed = urllib.parse.urlparse(url or "")
+        path = parsed.path.strip("/").lower()
+        url_lower = (url or "").lower()
+    except Exception:
+        return False
+    if path in _HOMEPAGE_PATHS or any(p in url_lower for p in _SEARCH_PATTERNS):
+        return True
+    if query_type != "video" and _is_video_url(url_lower):
+        return True
+    return False
 
 
 def search_deep(query, validate=True, classify=True, max_validate=50,
@@ -1930,32 +1931,12 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     all_raw = [item for item in all_raw if not is_blocked_domain(item.get("url", ""), query_type)]
 
     # Filter homepages, search results, and video URLs (saves validation time)
-    _HOMEPAGE_PATHS = {"", "/", "home", "index.html", "index.htm"}
-    _SEARCH_PATTERNS = ("/search", "search?q=", "search?s=", "/images/search")
-    # Video domains: block ALL URLs from these domains (playlists, channels, redirects)
-    _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "rutube", "yandex.ru/video", "dzen.ru/video",
-                      "vimeo.com", "tiktok.com")
-    # Video path patterns: block specific paths
-    _VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
     _filtered_out = []
     _kept = []
     for item in all_raw:
-        url = item.get("url", "")
-        try:
-            parsed = urllib.parse.urlparse(url)
-            path = parsed.path.strip("/").lower()
-            url_lower = url.lower()
-            # Homepage / search filter
-            if path in _HOMEPAGE_PATHS or any(p in url_lower for p in _SEARCH_PATTERNS):
-                _filtered_out.append(url)
-            # Video filter — block entire domains + path patterns for non-video queries
-            elif query_type != "video" and (
-                any(d in url_lower for d in _VIDEO_DOMAINS) or
-                any(p in url_lower for p in _VIDEO_PATH_PATTERNS)):
-                _filtered_out.append(url)
-            else:
-                _kept.append(item)
-        except Exception:
+        if _should_filter_url(item.get("url", ""), query_type):
+            _filtered_out.append(item.get("url", ""))
+        else:
             _kept.append(item)
     if _filtered_out:
         all_raw = _kept
@@ -1973,14 +1954,12 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
         except Exception as exc:
             print(f"[ddg-search] dynamic query generation failed: {exc}", file=sys.stderr)
 
-    # Video filter AGAIN after dynamic variants (catches any new video URLs)
+    # Video filter again after dynamic variants (catches any new video URLs)
     if query_type != "video":
-        _video_filtered = []
         _video_kept = []
+        _video_filtered = []
         for item in all_raw:
-            url_lower = item.get("url", "").lower()
-            if (any(d in url_lower for d in _VIDEO_DOMAINS) or
-                any(p in url_lower for p in _VIDEO_PATH_PATTERNS)):
+            if _is_video_url(item.get("url", "")):
                 _video_filtered.append(item.get("url", ""))
             else:
                 _video_kept.append(item)
@@ -2040,6 +2019,13 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
 
     for batch_start in range(0, len(ordered_urls), batch_size):
         batch = ordered_urls[batch_start:batch_start + batch_size]
+        # Domain quarantine: skip URLs whose domain is already proven blocking us
+        batch = [
+            r for r in batch
+            if _base_domain((urllib.parse.urlparse(r.get("url", "")).hostname or "").lower()) not in quarantined
+        ]
+        if not batch:
+            continue
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(_validate_one, item) for item in batch]
             for future in futures:
@@ -2141,6 +2127,7 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     }
     
     # Add top-level flat results (sorted by relevance)
+    validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
     result["results"] = validated
     
     if compose:

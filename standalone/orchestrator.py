@@ -243,6 +243,12 @@ def _query_variants(query, query_type="general"):
             "wallpapers collection",
             "art exhibition showcase",
         ],
+        "video": [
+            "video sources clips footage",
+            "watch online stream full",
+            "video archive collection",
+            "trailer official release",
+        ],
         "historical": [
             "history origins timeline",
             "detailed chronology evolution",
@@ -328,113 +334,129 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
         check = ddg_search._check_url_live(item.get("url", ""), timeout=5)
         return item, check
 
-    # Separate: normal, deferred (503/timeout), blocked (403/captcha)
-    to_check = urls[:max_validate]
-    normal_urls = []
-    deferred_urls = []
-    for item in to_check:
-        dom = _base_domain(urlparse(item.get("url", "")).hostname)
-        if dom in blocked_domains:
-            blocked_domains_count += 1
-            continue  # Skip entirely — domain actively blocking us
-        elif dom in deferred_domains:
-            deferred_urls.append(item)
+    def _process_one(item, check):
+        """Handle one validation result (shared by main batches and the deferred pass)."""
+        nonlocal alive_count, dead_count, blocked_count, deferred_count, \
+            proxy_success_count, blocked_domains_count
+        url = item.get("url", "")
+        short_url = url[:80]
+        dom = _base_domain(urlparse(url).hostname)
+
+        if check.get("alive"):
+            alive_count += 1
+            body = check.get("body", "")
+            text = ""
+            img_count = 0
+            if body:
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(body, "lxml")
+                    text = soup.get_text(separator=" ", strip=True)[:8000]
+                    if query_type == "visual":
+                        img_count = len(soup.find_all("img"))
+                except Exception:
+                    text = body[:8000]
+            item["text"] = text
+            item["alive"] = True
+            item["text_length"] = check.get("text_length", 0)
+            # For visual queries: extract image URLs from validation HTML
+            if query_type == "visual" and body:
+                item["val_images"] = ddg_search.extract_fullsize_images(body, url)[:20]
+            text_rel = ddg_search.content_relevance_score(query, text)
+            # Visual img_bonus: only if keywords present AND 15+ images (gallery)
+            has_keywords = _has_query_keywords(text, query)
+            if query_type == "visual" and has_keywords and img_count >= 15:
+                img_bonus = min((img_count - 14) * 0.02, 0.25)
+            else:
+                img_bonus = 0
+            item["relevance"] = min(text_rel + img_bonus, 1.0)
+            item["img_count"] = img_count
+            if check.get("proxy_used"):
+                proxy_success_count += 1
+            validated.append(item)
+            if log:
+                bonus_str = f" +img={img_bonus:.2f}" if img_bonus else ""
+                kw_str = " kw=✓" if has_keywords else ""
+                proxy_str = " [proxy]" if check.get("proxy_used") else ""
+                log(f"    ALIVE [{alive_count}] rel={item['relevance']:.2f} (text={text_rel:.2f}{bonus_str}) imgs={img_count}{kw_str} len={item['text_length']}{proxy_str} {short_url}")
         else:
-            normal_urls.append(item)
+            reason = check.get("error", "unknown")
+            status = check.get("status")
+            proxy_attempt = " (proxy failed)" if (ddg_search.USE_PROXY and not check.get("proxy_used")) else ""
+            # Blocked: 403/captcha after proxy → skip domain entirely
+            if check.get("blocked") or (status and status in (403, 429, 451)):
+                domain_fails[dom] = domain_fails.get(dom, 0) + 1
+                if domain_fails[dom] >= 2 and dom not in blocked_domains:
+                    blocked_domains.add(dom)
+                    blocked_domains_count += 1
+                    if log:
+                        log(f"    BLOCK DOMAIN: {dom} ({domain_fails[dom]} blocks after proxy) — skipping all URLs")
+            # Deferred: 503/timeout after proxy → try at end of list
+            elif status in (503, 504) or "timeout" in reason.lower() or "getaddrinfo" in reason.lower():
+                if dom not in deferred_domains and dom not in blocked_domains:
+                    deferred_domains.add(dom)
+                    deferred_count += 1
+                    if log:
+                        log(f"    DEFER: {dom} (temporarily unavailable) — moving to end")
+            if check.get("blocked"):
+                blocked_count += 1
+                if log:
+                    log(f"    BLOCKED {reason}{proxy_attempt} | {short_url}")
+            elif status:
+                http_errors[status] = http_errors.get(status, 0) + 1
+                dead_count += 1
+                if log:
+                    log(f"    DEAD HTTP {status}{proxy_attempt} | {short_url}")
+            else:
+                dead_count += 1
+                if log:
+                    log(f"    DEAD {reason}{proxy_attempt} | {short_url}")
 
-    # Limit deferred URLs — don't waste time on many 503 domains
+    # Domain quarantine: skip URLs from domains already proven blocking us;
+    # hold URLs from temporarily-unavailable domains for a final retry pass.
+    to_check = urls[:max_validate]
     MAX_DEFERRED = 10
-    deferred_urls = deferred_urls[:MAX_DEFERRED]
-    if deferred_urls and log:
-        log(f"  Deferred: {len(deferred_urls)} URLs to try at end (max {MAX_DEFERRED})")
+    deferred_pending = []
 
-    # Validate: normal first, deferred at the end
-    ordered_urls = normal_urls + deferred_urls
+    def _partition(batch):
+        keep, pending = [], []
+        for item in batch:
+            dom = _base_domain(urlparse(item.get("url", "")).hostname)
+            if dom in blocked_domains:
+                blocked_domains_count += 1          # skip entirely — domain blocking us
+            elif dom in deferred_domains:
+                pending.append(item)                # try again at the end
+            else:
+                keep.append(item)
+        return keep, pending
+
     batch_size = 10
-
-    for batch_start in range(0, len(ordered_urls), batch_size):
-        batch = ordered_urls[batch_start:batch_start + batch_size]
+    for batch_start in range(0, len(to_check), batch_size):
         # Skip if already have enough alive pages
         if alive_count >= max_validate:
             break
-
+        keep, pending = _partition(to_check[batch_start:batch_start + batch_size])
+        deferred_pending.extend(pending)
+        if not keep:
+            continue
         with ThreadPoolExecutor(max_workers=10) as ex:
-            futures = [ex.submit(validate_one, item) for item in batch]
+            futures = [ex.submit(validate_one, item) for item in keep]
             for f in futures:
+                if alive_count >= max_validate:
+                    break
                 item, check = f.result()
-                url = item.get("url", "")
-                short_url = url[:80]
-                dom = _base_domain(urlparse(url).hostname)
+                _process_one(item, check)
 
-                if check.get("alive"):
-                    alive_count += 1
-                    body = check.get("body", "")
-                    text = ""
-                    img_count = 0
-                    if body:
-                        try:
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(body, "lxml")
-                            text = soup.get_text(separator=" ", strip=True)[:8000]
-                            if query_type == "visual":
-                                img_count = len(soup.find_all("img"))
-                        except Exception:
-                            text = body[:8000]
-                    item["text"] = text
-                    item["alive"] = True
-                    item["text_length"] = check.get("text_length", 0)
-                    # For visual queries: extract image URLs from validation HTML
-                    if query_type == "visual" and body:
-                        item["val_images"] = ddg_search.extract_fullsize_images(body, url)[:20]
-                    text_rel = ddg_search.content_relevance_score(query, text)
-                    # Visual img_bonus: only if keywords present AND 15+ images (gallery)
-                    has_keywords = _has_query_keywords(text, query)
-                    if query_type == "visual" and has_keywords and img_count >= 15:
-                        img_bonus = min((img_count - 14) * 0.02, 0.25)
-                    else:
-                        img_bonus = 0
-                    item["relevance"] = min(text_rel + img_bonus, 1.0)
-                    item["img_count"] = img_count
-                    if check.get("proxy_used"):
-                        proxy_success_count += 1
-                    validated.append(item)
-                    if log:
-                        bonus_str = f" +img={img_bonus:.2f}" if img_bonus else ""
-                        kw_str = " kw=✓" if has_keywords else ""
-                        proxy_str = " [proxy]" if check.get("proxy_used") else ""
-                        log(f"    ALIVE [{alive_count}] rel={item['relevance']:.2f} (text={text_rel:.2f}{bonus_str}) imgs={img_count}{kw_str} len={item['text_length']}{proxy_str} {short_url}")
-                else:
-                    reason = check.get("error", "unknown")
-                    status = check.get("status")
-                    proxy_attempt = " (proxy failed)" if (ddg_search.USE_PROXY and not check.get("proxy_used")) else ""
-                    # Blocked: 403/captcha after proxy → skip domain entirely
-                    if check.get("blocked") or (status and status in (403, 429, 451)):
-                        domain_fails[dom] = domain_fails.get(dom, 0) + 1
-                        if domain_fails[dom] >= 2 and dom not in blocked_domains:
-                            blocked_domains.add(dom)
-                            blocked_domains_count += 1
-                            if log:
-                                log(f"    BLOCK DOMAIN: {dom} ({domain_fails[dom]} blocks after proxy) — skipping all URLs")
-                    # Deferred: 503/timeout after proxy → try at end of list
-                    elif status in (503, 504) or "timeout" in reason.lower() or "getaddrinfo" in reason.lower():
-                        if dom not in deferred_domains and dom not in blocked_domains:
-                            deferred_domains.add(dom)
-                            if log:
-                                log(f"    DEFER: {dom} (temporarily unavailable) — moving to end")
-                    proxy_attempt_str = proxy_attempt
-                    if check.get("blocked"):
-                        blocked_count += 1
-                        if log:
-                            log(f"    BLOCKED {reason}{proxy_attempt} | {short_url}")
-                    elif status:
-                        http_errors[status] = http_errors.get(status, 0) + 1
-                        dead_count += 1
-                        if log:
-                            log(f"    DEAD HTTP {status}{proxy_attempt} | {short_url}")
-                    else:
-                        dead_count += 1
-                        if log:
-                            log(f"    DEAD {reason}{proxy_attempt} | {short_url}")
+    # Final pass: deferred domains get one more chance (server may have recovered)
+    deferred_pending = deferred_pending[:MAX_DEFERRED]
+    if deferred_pending:
+        if log:
+            log(f"  Deferred: {len(deferred_pending)} URLs to try at end (max {MAX_DEFERRED})")
+        for item in deferred_pending:
+            if alive_count >= max_validate:
+                break
+            item, check = validate_one(item)
+            _process_one(item, check)
 
     if log:
         log(f"  Validation summary: {alive_count} alive, {dead_count} dead, {blocked_count} blocked, {blocked_domains_count} domain-blocked, {deferred_count} deferred")
@@ -451,7 +473,7 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
 
 def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, query_type="general", max_imgs_per_page=5):
     """Deep-read pages: fetch full content + extract images from raw HTML.
-    Applies content cleaning, relevance filtering, and domain dedup (max 2 per domain).
+    Applies content cleaning, relevance filtering, and domain dedup (max 1 per dedup key).
     For visual queries: image count boosts relevance to avoid dropping image-rich pages."""
     deep_pages = []
     all_images = []
@@ -570,13 +592,23 @@ def _filter_images_for_report(images, log=None):
     """
     import httpx
     from hashlib import md5
-    from PIL import Image
     import io
     from concurrent.futures import ThreadPoolExecutor
     import ddg_search
 
+    # Pillow is optional: without it we skip format/hash/size filtering (degraded but functional).
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
+
     SKIP_FORMATS = ('.gif', '.svg', '.ico', '.cur', '.bmp', '.tiff')
     MIN_WIDTH, MIN_HEIGHT = 600, 450
+
+    if Image is None:
+        if log:
+            log(f"    Image filter: skipped (Pillow not installed) — keeping {len(images)} images")
+        return images
 
     def _is_skippable(url):
         url_lower = url.lower().split('?')[0]
@@ -629,6 +661,7 @@ def _filter_images_for_report(images, log=None):
         filtered.append(r['img'])
 
     # Phase 2: Proxy retry for quarantined images
+    phase2_recovered = 0
     if quarantine and ddg_search.USE_PROXY and ddg_search.PROXY_URL:
         proxy = ddg_search.PROXY_URL
 
@@ -660,9 +693,10 @@ def _filter_images_for_report(images, log=None):
             r['img']['width'] = r['width']
             r['img']['height'] = r['height']
             filtered.append(r['img'])
+            phase2_recovered += 1
 
     if log:
-        log(f"    Image filter: {len(images)} → {len(filtered)} (quarantine: {len(quarantine)}, proxy recovered: {len(filtered) - len(seen_hashes) + len(quarantine)})")
+        log(f"    Image filter: {len(images)} → {len(filtered)} (quarantine: {len(quarantine)}, proxy recovered: {phase2_recovered})")
 
     return filtered
 
@@ -1000,9 +1034,10 @@ CRITICAL RULES:
 
     # Step 11: Build final report (articles + images + synthesis)
     log("Building report...")
+    total_time = round(time.time() - start_total, 1)
+    timings["total"] = total_time
     report = _build_report(query, query_type, evidence, images, synthesis, timings, validated)
 
-    total_time = round(time.time() - start_total, 1)
     log(f"\nTotal: {total_time}s")
 
     return {
@@ -1046,9 +1081,10 @@ def _build_report(query, query_type, evidence, images, synthesis, timings, valid
 
     # Images
     if images:
+        from urllib.parse import quote
         parts.append("## Images\n")
         for img in images:
-            img_url = img['url'].replace(' ', '%20')
+            img_url = quote(img['url'], safe=":/?&=#%~")
             parts.append(f"![{img.get('title', 'image')}]({img_url})")
         parts.append("")
 
