@@ -927,11 +927,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
     _VIDEO_DOMAINS = ("youtube.com", "rutube.ru", "rutube", "yandex.ru/video",
                       "dzen.ru/video", "vimeo.com", "tiktok.com")
     _VIDEO_PATH_PATTERNS = ("watch?", "view_video.php", "video_", ".mp4", ".avi", ".mov")
-    # Technical path prefixes that are never content. Unlike the old
-    # _SERVICE_PATHS substring list (/account killed /accounting), the
-    # legal/account/noise segments are now matched as WHOLE path segments via
-    # junk_filter.should_skip_crawl_url (ported WP-1) — precise and safe.
-    _SERVICE_PREFIXES = ("/feed", "/preload", "/place")
+    # Technical path prefixes that are never content — matched as WHOLE path
+    # SEGMENTS (feed, feed/rss), never as substrings (/feedbacks, /placeholder
+    # must pass). The old substring _SERVICE_PATHS list was both inert (the
+    # leading slash was stripped before the `in` check) and dangerous
+    # (/account killed /accounting); legal/account/noise now go through
+    # junk_filter.should_skip_crawl_url (ported WP-1, whole-segment match).
+    _SERVICE_PREFIXES = ("feed", "preload", "place")
     for r in all_results:
         url = r.get("url", "")
         if ddg_search.is_blocked_domain(url):
@@ -943,7 +945,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 homepage_urls.append(url)
             elif any(p in url_lower for p in _SEARCH_PATTERNS):
                 search_urls.append(url)
-            elif any(path.startswith(p.strip("/")) for p in _SERVICE_PREFIXES):
+            elif any(path == p or path.startswith(p + "/") for p in _SERVICE_PREFIXES):
                 service_urls.append(url)
             elif should_skip_crawl_url(url):
                 # WP-1: legal/account/noise segments (login, privacy, terms,

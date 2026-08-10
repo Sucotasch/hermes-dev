@@ -166,6 +166,14 @@ def test_strip_tracking_params_noop():
     assert strip_tracking_params("https://cdn.x.com/f.jpg") == "https://cdn.x.com/f.jpg"
 
 
+def test_strip_tracking_params_fragment_survives():
+    # A fragment after a tracking param must NOT be dropped with the key
+    assert strip_tracking_params(
+        "https://x.com/a.jpg?utm_source=x#frag") == "https://x.com/a.jpg#frag"
+    assert strip_tracking_params(
+        "https://x.com/a.jpg?w=800&utm_source=x#frag") == "https://x.com/a.jpg?w=800#frag"
+
+
 def test_extract_fullsize_images_dedup_utm_variants():
     # Two URLs that differ ONLY in tracking params collapse to one
     html = ('<meta property="og:image" content="https://cdn.x.com/a.jpg?utm_source=a">'

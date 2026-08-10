@@ -32,7 +32,10 @@ def strip_tracking_params(url):
     try:
         if not url or "?" not in url:
             return url
-        base, _, query = url.partition("?")
+        base, _, rest = url.partition("?")
+        # Fragment must not bleed into a query pair (utm_source=x#frag is a
+        # tracking param + fragment, not a key to drop the fragment with).
+        query, _, fragment = rest.partition("#")
         if not query:
             return url
         kept = []
@@ -45,7 +48,10 @@ def strip_tracking_params(url):
             kept.append(pair)
         if not changed:
             return url
-        return base + ("?" + "&".join(kept) if kept else "")
+        out = base + ("?" + "&".join(kept) if kept else "")
+        if fragment:
+            out += "#" + fragment
+        return out
     except Exception:
         return url
 
