@@ -981,8 +981,10 @@ blocked"), not a proxy outage.
 | Q3 Level-2 pre-filter: utility-path tokens + dedup-key cap (2/domain) before validation | ✅ | `c54dab9` |
 | Dead code: `synthesize_answer` removed; `_search_*`/`compose`/`fetch_page`/`image_search`/`VISUAL_ALLOWLIST` KEPT (reachable via CLI/tests/search_deep — not dead) | ✅ | `c54dab9` |
 
-Tests: 98/98 pass (83 prior + 15 new: sieve link-rule methods, discovery module,
-extract_thumbnail_links). All modules py_compile clean. Still open (product
+| **Crawl layer (WP-1/4, WP-5.2 port from web-media-parser, 2026-08-11)** — `should_skip_crawl_url` (segment-aware legal/account/noise skip before validation + INT-3 viewer-link filter before network), `_is_likely_content_page` tie-breaker in Step 5/Level-2 sorts, `strip_tracking_params` + normalized dedup in both `extract_fullsize_images` copies and `_dedup_key` (signed-URL safe), `consent_cookie_header` pre-set on document fetches (skips r.jina.ai/duckduckgo). Segment service prefixes fixed (feedbacks/placeholder false positive); fragment survival in strip | ✅ 130/130 tests | `450e15a`, `fc47fa6` |
+
+Tests: 130/130 pass (98 prior + 32 new: WP-1 skip, content signal, tracking-strip,
+consent cookies, dedup-by-normalize). All modules py_compile clean. Still open (product
 decisions): NEW-8 report size cap.
 
 **INT-3 fullsize discovery implemented** (`09d380e`, user OK to return to
