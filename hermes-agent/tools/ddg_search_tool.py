@@ -371,20 +371,14 @@ def _apply_post_retrieval_filter(evidence, query, final_limit=80):
 
 
 def _is_coverage_sufficient(pages, query):
-    terms = [t.lower() for t in re.findall(r"\b\w+\b", query.lower()) if len(t) > 3]
-    if not terms:
-        return True
-    term_hits = {t: 0 for t in terms}
-    for p in pages:
-        text = " ".join([
-            (p.get("title") or ""),
-            (p.get("text") or ""),
-        ]).lower()
-        for t in terms:
-            if t in text:
-                term_hits[t] += 1
-    covered = sum(1 for count in term_hits.values() if count >= 2)
-    return covered >= max(1, len(terms) // 2)
+    """Topic-coverage gate. Delegates to the shared _coverage module so tests
+    exercise the production code; if the module is missing (e.g. after a partial
+    restore), conservatively report 'insufficient' to trigger Level-2 expansion."""
+    try:
+        from _coverage import is_coverage_sufficient
+        return is_coverage_sufficient(pages, query)
+    except Exception:
+        return False
 
 
 def _schema_search_deep():

@@ -112,6 +112,8 @@ $Files = @(
     @{ Repo = 'hermes-agent\tools\browser_dialog_tool.py'; Dest = 'hermes-agent\tools\browser_dialog_tool.py' }
     @{ Repo = 'plugins\web-tools\ddg\ddg_search.py'; Dest = 'plugins\web-tools\ddg\ddg_search.py' }
     @{ Repo = 'plugins\web-tools\ddg\visit_website_enhanced.py'; Dest = 'plugins\web-tools\ddg\visit_website_enhanced.py' }
+    @{ Repo = 'plugins\web-tools\ddg\query_variants.py'; Dest = 'plugins\web-tools\ddg\query_variants.py' }
+    @{ Repo = 'plugins\web-tools\ddg\_coverage.py'; Dest = 'plugins\web-tools\ddg\_coverage.py' }
     @{ Repo = 'CONTEXT.md'; Dest = 'CONTEXT.md' }
     @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
     @{ Repo = 'skills\web-deep-search\SKILL.md'; Dest = 'skills\web-deep-search\SKILL.md' }
