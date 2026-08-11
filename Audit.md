@@ -962,6 +962,16 @@ reachable (verified after the run); the 81/81 "proxy failed" markers were a side
 effect of B1 (nothing reached the proxy because direct pages already "looked
 blocked"), not a proxy outage.
 
+### 15.5 Log analysis — `research_2026-08-11_132932.log` (2026-08-11, 2 runs) + fixes
+
+**Run 1 (visual, 514.8s)**: 60/103 alive, domain quarantine (listal/pinterest/uploadedtrend/wonderclub), 18 deep-read pages, 869 raw → 545 unique → 106 images. **Run 2 (technical, 213.1s)**: 76/100 alive, quarantine (medium/knightli/zhihu), 7 evidence pages. No crashes.
+
+**Bug S5.1 — `IMG: false` placeholder in report** (new, from GitHub HTML): sites emit `data-lazy="false"` / `data-ssr="true"` / `srcset="false"`; the `data-*` regex in `extract_fullsize_images` captured the literal `false` as an image URL. In technical runs (no image-format filter) it reached the report. **Fixed (19874da)**: after `//`/`/` resolution, require `http(s)://` prefix — drops all non-URL placeholders in both copies (ddg_search + visit_website_enhanced).
+
+**Bug S5.2 — text scoring 0.00 for real matches** (root cause of flat rel=0.12 evidence): `content_relevance_score` filtered query words by `len>2`, so **`St` in "Sara St James" dropped** and the phrase gate failed for pages writing "Sara St. James" (babepedia text=2928 → 0.00). Technical queries broke too: `llama.cpp`/`Qwen3.6-27B` tokenized into pieces that never matched (scavazzon, a real run-Qwen-27B guide, got 0.00 and was skipped). **Fixed (19874da + 1277c67)**: phrases built from ALL 2+ letter words (stop-words excluded), 2-letter words are **phrase-only and never score individually** (no `st`/`in`/`of` inflation — user's requirement), punctuation-normalized matching (`[^\w]+`→space, Unicode-safe for Cyrillic), long words only score hits; restored `len(phrase_words)>=2` gate guard so single-word/stopword-collapsed queries score by hits (review fix). Verified: babepedia-like 0.9, pornzog-like 0.22, scavazzon-like 0.21, false-positive corpus 0.0. Tests: +9 in test_scoring.py.
+
+**Known cosmetic (unchanged)**: evidence selection log prints before sort; IMG log truncates URLs at 80 chars (looks like duplicate images).
+
 ### 15.4 Implementation status (2026-08-10, commits after `71d1fdf`)
 
 | Item | Status | Commit |
