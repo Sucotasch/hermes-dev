@@ -972,6 +972,15 @@ blocked"), not a proxy outage.
 
 **Known cosmetic (unchanged)**: evidence selection log prints before sort; IMG log truncates URLs at 80 chars (looks like duplicate images).
 
+### 15.6 Log analysis — `research_2026-08-11_142637.log` (2026-08-11, 2 runs) + report review
+
+**Confirms S5.1/S5.2 fixes**: visual run — 44 evidence pages (was 19), top pages now rel=1.00 (babepedia, pornzog, penthousegold, telegra.ph, pictoa; previously 0.12–0.25); technical run — 48 evidence pages (was 7), scavazzon recovered from rel=0.00 → 0.53; `IMG: false` gone (0 occurrences). Synthesis quality high: full bio + explicit "Confusion Clarifications" section where the LLM separated singer Sarah Saint James from actress Sara St. James, and Gaps #5 flagged the foreign interview source.
+
+**Known limitation (accepted, no code change)**: deep-read scored the Sarah Saint James singer interview (squarespace) at rel=0.96 — validation 0.00 → deep-read 0.96. Cause: "st james" is also a common toponym (St James's Park/Street) passing the phrase gate, plus substring hit "sara" matching "sarah". A word-boundary hit match would reduce it (0.38→0.19 in tests) but was declined — it only fixes this synthetic case (unusual name chosen for testing), and the LLM synthesis already excludes the foreign source. Revisit only if real-user queries show consistent substring false positives.
+
+**Unchanged cosmetics**: IMG log truncates URLs at 80 chars (duplicate-looking lines are different URLs); evidence log prints before relevance sort.
+
+
 ### 15.4 Implementation status (2026-08-10, commits after `71d1fdf`)
 
 | Item | Status | Commit |
