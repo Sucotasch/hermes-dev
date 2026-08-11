@@ -19,6 +19,16 @@ except Exception:
     def should_skip_crawl_url(url, extra=None):
         return False
 
+try:
+    from evidence_rank import select_evidence_chunks, is_jina_antibot
+except Exception:
+    # Fail-open: BM25/antibot ranking is an enhancement, never a hard dep.
+    def select_evidence_chunks(query, text, max_chars=4000, **kw):
+        return (text or "")[:max_chars]
+
+    def is_jina_antibot(body, **kw):
+        return False
+
 
 # ── Readability-style content extractor ──────────────────────────────────────
 def _extract_main_content(html):
@@ -597,6 +607,9 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 try:
                     jina_url = f"https://r.jina.ai/{url}"
                     raw_html = vwe._fetch(jina_url)
+                    # A Jina CAPTCHA/Cloudflare challenge is not content.
+                    if raw_html and is_jina_antibot(raw_html):
+                        raw_html = None
                 except Exception:
                     pass
             if not raw_html or len(raw_html) < 300:
@@ -1181,11 +1194,15 @@ def run_deep_research(query, server_url="http://localhost:8888",
             skipped_evidence.append(f"{url[:60]} (relevance={final_relevance:.2f} < {min_relevance})")
             continue
 
+        # BM25-ranked chunk selection (TinySearch port): keep the most
+        # relevant passages instead of a blind head-of-page slice, and drop
+        # near-duplicate passages across sources.
+        content = select_evidence_chunks(query, text, max_chars=4000) if text else ""
         evidence.append({
             "url": url,
             "title": p.get("title", ""),
             "relevance": final_relevance,
-            "content": text[:4000] if text else "",
+            "content": content,
             "img_count": img_count,
         })
     if log:

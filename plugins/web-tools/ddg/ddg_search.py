@@ -487,9 +487,19 @@ def _fetch_jina(url):
     """Try Jina Reader as fallback for blocked pages."""
     jina_url = f"{JINA_URL}{url}"
     html = _fetch(jina_url, "document")
-    if html and _is_valid_content(html):
+    if html and _is_valid_content(html) and not _is_antibot_jina(html):
         return html
     return None
+
+
+def _is_antibot_jina(body):
+    """Fail-open Jina CAPTCHA/Cloudflare challenge detection (agent-reach port)."""
+    try:
+        from evidence_rank import is_jina_antibot
+
+        return is_jina_antibot(body)
+    except Exception:
+        return False
 
 # ── DDG Image Search ───────────────────────────────────────────────────────
 
@@ -946,7 +956,7 @@ def _search_jina_ddg(query, page, count, region, safe):
     
     jina_url = f"{JINA_URL}{url}"
     html = _fetch(jina_url, "document")
-    if not html or not _is_valid_content(html):
+    if not html or not _is_valid_content(html) or _is_antibot_jina(html):
         return None
     
     parser = _DDGResultParser()
@@ -998,7 +1008,7 @@ def _search_jina(query, page, count):
     google_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&num={count * 3}"
     jina_url = f"{JINA_URL}{google_url}"
     html = _fetch(jina_url, "document")
-    if not html or not _is_valid_content(html):
+    if not html or not _is_valid_content(html) or _is_antibot_jina(html):
         return None
     
     results = _parse_google_results(html, count)

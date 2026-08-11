@@ -263,9 +263,19 @@ def _fetch_jina(url):
     """Jina Reader fallback."""
     jina_url = f"{JINA_URL}{url}"
     html = _fetch(jina_url, referrer="https://r.jina.ai/")
-    if html and len(html) > 100:
+    if html and len(html) > 100 and not _is_antibot_jina(html):
         return html
     return None
+
+
+def _is_antibot_jina(body):
+    """Fail-open Jina CAPTCHA/Cloudflare challenge detection (agent-reach port)."""
+    try:
+        from evidence_rank import is_jina_antibot
+
+        return is_jina_antibot(body)
+    except Exception:
+        return False
 
 # ── Block detection ────────────────────────────────────────────────────────
 def _is_blocked(html):
