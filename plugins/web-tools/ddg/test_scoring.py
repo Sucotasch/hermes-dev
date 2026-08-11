@@ -78,6 +78,25 @@ def test_short_text_penalty_is_applied():
     assert short < full
 
 
+def test_single_word_query_scores_by_hits():
+    # Single-word queries have no 2-word phrase to gate on — they must score
+    # by word presence (regression guard: phrase gate must not return 0.0
+    # unconditionally when fewer than 2 significant words remain).
+    s = ddg_search.content_relevance_score("python", "python programming tutorial")
+    assert s > 0.0
+    s2 = ddg_search.content_relevance_score("python", "cooking pasta carbonara")
+    assert s2 == 0.0
+
+
+def test_stopword_collapsed_query_scores_by_hits():
+    # "best" is a stop word; the query collapses to a single significant word
+    # and must still score (not be gated to 0.0).
+    s = ddg_search.content_relevance_score(
+        "best laptop", "best laptop for programming 2026"
+    )
+    assert s > 0.0
+
+
 def test_blocked_domain():
     assert ddg_search.is_blocked_domain("https://www.bing.com/search?q=x") is True
     assert ddg_search.is_blocked_domain("https://duckduckgo.com/") is True

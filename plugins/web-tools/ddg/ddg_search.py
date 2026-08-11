@@ -2018,15 +2018,18 @@ def content_relevance_score(query, text):
     text_lower = text.lower()[:10000]
     text_norm = re.sub(r'[^\w]+', ' ', text_lower)
 
-    # Require at least one 2-word phrase match (normalized, so "st." and
-    # "st" and punctuation-split tokens all resolve to the same form)
+    # Require at least one 2-word phrase match — but only when the query has
+    # 2+ significant words (single-word and stopword-collapsed queries such as
+    # "best laptop" score by hits instead of being gated to 0.0). Normalized
+    # text only: any space-separated phrase present in text_lower survives in
+    # text_norm, and punctuation-split tokens ("st.", "llama.cpp") resolve too.
     has_phrase = False
     for i in range(len(phrase_words) - 1):
         phrase = f"{phrase_words[i]} {phrase_words[i+1]}"
-        if phrase in text_lower or phrase in text_norm:
+        if phrase in text_norm:
             has_phrase = True
             break
-    if not has_phrase:
+    if not has_phrase and len(phrase_words) >= 2:
         return 0.0
 
     # Single word scoring (with phrase requirement above) — long words only
