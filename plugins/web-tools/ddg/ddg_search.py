@@ -1547,6 +1547,11 @@ def extract_fullsize_images(html, base_url=""):
             url = "https:" + url
         elif url.startswith("/") and parsed_base:
             url = f"{parsed_base.scheme}://{parsed_base.netloc}{url}"
+        # Drop non-URL placeholders: sites emit data-lazy="false",
+        # srcset="false", data-loading="none", … (observed on github.com).
+        # After the // and / resolution above, a real URL must be absolute.
+        if not url.startswith(("http://", "https://")):
+            continue
         # Dedup by NORMALIZED identity (utm_*/fbclid variants of the same
         # image collapse to one) but keep the tracking-stripped URL for output
         # (signed CDN params and their order are preserved).
@@ -1968,37 +1973,69 @@ def _relevance_score(query, title, body_text):
     return len(scored) / len(query_words)
 
 
+# Stop words excluded from BOTH phrase construction and scoring. Kept in sync
+# with orchestrator._has_query_keywords so the two relevance signals agree.
+_SCORE_STOP_WORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "are", "was",
+    "has", "had", "have", "not", "but", "can", "will", "all", "any",
+    "free", "image", "gallery", "photo", "photos", "picture", "pictures",
+    "video", "videos", "forum", "site", "web", "online", "best", "top",
+    "new", "old", "more", "very", "just", "about", "also",
+    # 2-letter functional words: they may JOIN a phrase but never score alone
+    "on", "in", "to", "at", "of", "it", "is", "be", "he", "she", "we",
+    "they", "me", "my", "do", "go", "up", "as", "by", "or", "if",
+}
+
+
 def content_relevance_score(query, text):
     """Score how relevant a page's text content is to the query.
 
     Returns 0.0-1.0. Higher = more relevant.
     Requires at least one 2-word phrase match to prevent false positives
     from single-word overlap (e.g., "sara" + "james" in unrelated context).
+
+    Design (fix for "St" in "Sara St James" and "llama.cpp" / "Qwen3.6-27B"):
+    - Phrases are built from ALL query words of 2+ letters (stop-words
+      excluded), so "sara st" and "st james" are real phrase candidates and
+      match a page that writes "Sara St. James".
+    - Short words (2 letters) participate ONLY inside phrases — they never
+      earn individual score points, so "st"/"in"/"of" cannot inflate the
+      score on their own.
+    - Both the query and the text are punctuation-normalized
+      (re.sub(r'[^\\w]+', ' ', ...), Unicode-safe) so dotted/hyphenated
+      tokens like "llama.cpp" → "llama cpp" and "Qwen3.6-27B" →
+      "qwen3 6 27b" can form matching phrases.
     """
     if not text:
         return 0.0
-    query_words = [w.lower() for w in re.findall(r'\b\w+\b', query) if len(w) > 2]
-    if not query_words:
+    query_norm = re.sub(r'[^\w]+', ' ', query.lower())
+    phrase_words = [w for w in query_norm.split()
+                    if len(w) >= 2 and w not in _SCORE_STOP_WORDS]
+    # Only 3+ letter words earn score points (short words are phrase-only)
+    hit_words = [w for w in phrase_words if len(w) > 2]
+    if not phrase_words or not hit_words:
         return 0.0
     text_lower = text.lower()[:10000]
+    text_norm = re.sub(r'[^\w]+', ' ', text_lower)
 
-    # Require at least one 2-word phrase match
+    # Require at least one 2-word phrase match (normalized, so "st." and
+    # "st" and punctuation-split tokens all resolve to the same form)
     has_phrase = False
-    for i in range(len(query_words) - 1):
-        phrase = f"{query_words[i]} {query_words[i+1]}"
-        if phrase in text_lower:
+    for i in range(len(phrase_words) - 1):
+        phrase = f"{phrase_words[i]} {phrase_words[i+1]}"
+        if phrase in text_lower or phrase in text_norm:
             has_phrase = True
             break
-    if not has_phrase and len(query_words) >= 2:
+    if not has_phrase:
         return 0.0
 
-    # Single word scoring (with phrase requirement above)
-    hits = sum(1 for w in query_words if w in text_lower)
-    base_score = hits / len(query_words)
+    # Single word scoring (with phrase requirement above) — long words only
+    hits = sum(1 for w in hit_words if w in text_norm)
+    base_score = hits / len(hit_words)
     if len(text) < 200:
         base_score *= 0.3
-    multi_hit = sum(1 for w in query_words if text_lower.count(w) >= 3)
-    base_score += (multi_hit / len(query_words)) * 0.2
+    multi_hit = sum(1 for w in hit_words if text_norm.count(w) >= 3)
+    base_score += (multi_hit / len(hit_words)) * 0.2
     return min(base_score, 1.0)
 
 

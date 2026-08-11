@@ -24,11 +24,48 @@ def test_irrelevant_page_scores_zero():
     assert s == 0.0
 
 
+def test_phrase_gate_passes_short_middle_word():
+    # "St" (2-letter) participates in phrases: "sara st" matches "Sara St.
+    # James" — this was a documented weakness (0.0) before the fix.
+    s = ddg_search.content_relevance_score("Sara St James", "Sara St. James biography")
+    assert s > 0.0
+
+
 def test_phrase_gate_blocks_name_overlap():
-    # "st" is filtered as a short token, so the 2-word phrase "sara james" is absent
-    # in a page that only ever writes "Sara St James" without other query phrases.
-    s = ddg_search.content_relevance_score("Sara St James", "Sara St James biography")
-    assert s == 0.0  # documented gate behavior (namesake prevention); known weakness
+    # Namesake prevention still holds: "James St. John" ≠ "Sara St James"
+    # (the "st james" phrase is absent in reversed word order).
+    s = ddg_search.content_relevance_score(
+        "Sara St James", "James St. John is a photographer from St. Louis"
+    )
+    assert s == 0.0
+
+
+def test_short_words_never_score_alone():
+    # 2-letter words (st/in/of) only join phrases — they never earn points on
+    # their own, so a page full of them but without long query words scores 0.
+    s = ddg_search.content_relevance_score(
+        "Sara St James",
+        "The St. Regis is in the heart of the city. In summer it is best to stay in the old town.",
+    )
+    assert s == 0.0
+
+
+def test_punctuation_normalized_technical_tokens():
+    # Dotted/hyphenated tokens match after punctuation normalization:
+    # "llama.cpp" → "llama cpp", "Qwen3.6-27B" → "qwen3 6 27b".
+    s = ddg_search.content_relevance_score(
+        "Qwen3.6-27B-Q4.GGUF64k context llama.cpp best settings for",
+        "Running Qwen 3.6 27B locally with llama.cpp. Best settings: context 64k, Q4 GGUF.",
+    )
+    assert s > 0.0
+
+
+def test_unicode_text_not_broken_by_normalization():
+    # Punctuation normalization must be Unicode-safe: Cyrillic words survive.
+    s = ddg_search.content_relevance_score(
+        "Супермодель биография", "Супермодель, биография и карьера на русской странице."
+    )
+    assert s > 0.0
 
 
 def test_short_text_penalty_is_applied():

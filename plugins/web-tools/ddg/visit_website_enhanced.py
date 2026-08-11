@@ -666,6 +666,11 @@ def extract_fullsize_images(html, base_url=""):
             url = "https:" + url
         elif url.startswith("/") and parsed_base:
             url = "%s://%s%s" % (parsed_base.scheme, parsed_base.netloc, url)
+        # Drop non-URL placeholders: sites emit data-lazy="false",
+        # srcset="false", data-loading="none", … (observed on github.com).
+        # After the // and / resolution above, a real URL must be absolute.
+        if not url.startswith(("http://", "https://")):
+            continue
         # Dedup by NORMALIZED identity (utm_*/fbclid variants of the same
         # image collapse to one) but keep the tracking-stripped URL for output
         # (signed CDN params and their order are preserved).
