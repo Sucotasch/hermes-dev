@@ -36,18 +36,18 @@ def test_chunk_text_splits_paragraphs_and_overlaps():
     big_para = "sentence one. " * 300  # ~4500 chars > 2000
     chunks = chunk_text(big_para, max_chunk_tokens=500, overlap_tokens=80)
     assert len(chunks) >= 2
-    # Overlap carries context across boundaries.
-    assert chunks[0]["text"].split()[-1] in chunks[1]["text"].split() or \
-        chunks[0]["text"][-80:] in chunks[1]["text"]
+    # Overlap carries the tail of the previous piece into the next one.
+    prev_tail = chunks[0]["text"][-40:]
+    assert prev_tail in chunks[1]["text"]
 
 
 def test_chunk_text_multiple_paragraphs():
     text = "\n\n".join([f"Paragraph {i} " + "data " * 30 for i in range(10)])
     chunks = chunk_text(text, max_chunk_tokens=200)
     assert len(chunks) > 1
-    for c in chunks:
+    for idx, c in enumerate(chunks):
         assert c["tokens"] > 0
-        assert c["chunk_id"] == chunks.index(c) or True
+        assert c["chunk_id"] == idx
 
 
 def test_rank_chunks_bm25_relevance():

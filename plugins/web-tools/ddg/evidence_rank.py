@@ -86,7 +86,9 @@ def chunk_text(
     is never split mid-paragraph unless the paragraph alone exceeds the cap,
     in which case it is split on sentence boundaries. ``overlap_tokens`` worth
     of trailing characters from a previous chunk are carried into the next one
-    so retrieval does not lose context across boundaries.
+    so retrieval does not lose context across boundaries. Note: overlap only
+    applies when a single oversized paragraph is split on sentence boundaries
+    (matching TinySearch); paragraph-to-paragraph boundaries carry no overlap.
 
     Returns chunks shaped like TinySearch's::
 
@@ -192,12 +194,8 @@ def rank_chunks_bm25(query: str, chunks: Sequence[dict[str, Any]], top_k: int = 
     if not query_tokens:
         return []
 
-    try:
-        from rank_bm25 import BM25Okapi  # noqa: F401
-
-        scores = _bm25_scores_rank_bm25(corpus, query_tokens)
-    except Exception:
-        scores = _bm25_scores_builtin(corpus, query_tokens)
+    # _bm25_scores_rank_bm25 already falls back to the builtin on any error.
+    scores = _bm25_scores_rank_bm25(corpus, query_tokens)
 
     ranked = sorted(zip(chunks, scores), key=lambda item: item[1], reverse=True)
     out: list[dict[str, Any]] = []
@@ -281,7 +279,7 @@ def select_chunks_with_quota_and_fill(
     url_counts: dict[str, int] = {}
     out: list[dict[str, Any]] = []
     accepted_sets: list[frozenset[str]] = []
-    chosen_ids: set[int] = set()
+    chosen_keys: set[Any] = set()
 
     def accepts(chunk: dict[str, Any]) -> bool:
         text = str(chunk.get(text_key) or "").strip()
@@ -294,15 +292,24 @@ def select_chunks_with_quota_and_fill(
             (jaccard_similarity_tokens(tokens, s) for s in accepted_sets if s), default=0.0
         ) < dedupe_jaccard_threshold
 
+    def chunk_key(chunk: dict[str, Any]) -> Any:
+        # chunk_id alone is not unique across sources, so pair it with the
+        # source URL; fall back to identity when neither is present.
+        cid = chunk.get("chunk_id")
+        url = str(chunk.get(source_key) or "")
+        if cid is not None:
+            return ("id", url, cid)
+        return ("obj", id(chunk))
+
     def append_chunk(chunk: dict[str, Any]) -> None:
-        chosen_ids.add(id(chunk))
+        chosen_keys.add(chunk_key(chunk))
         out.append(chunk)
         accepted_sets.append(_token_set(str(chunk.get(text_key) or "").strip()))
 
     for chunk in ranked:
         if len(out) >= limit:
             break
-        if id(chunk) in chosen_ids:
+        if chunk_key(chunk) in chosen_keys:
             continue
         url = str(chunk.get(source_key) or "")
         if url_counts.get(url, 0) >= max_per_source_url:
@@ -316,7 +323,7 @@ def select_chunks_with_quota_and_fill(
         for chunk in ranked:
             if len(out) >= limit:
                 break
-            if id(chunk) in chosen_ids:
+            if chunk_key(chunk) in chosen_keys:
                 continue
             if not accepts(chunk):
                 continue
