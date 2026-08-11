@@ -983,6 +983,8 @@ blocked"), not a proxy outage.
 
 | **Crawl layer (WP-1/4, WP-5.2 port from web-media-parser, 2026-08-11)** — `should_skip_crawl_url` (segment-aware legal/account/noise skip before validation + INT-3 viewer-link filter before network), `_is_likely_content_page` tie-breaker in Step 5/Level-2 sorts, `strip_tracking_params` + normalized dedup in both `extract_fullsize_images` copies and `_dedup_key` (signed-URL safe), `consent_cookie_header` pre-set on document fetches (skips r.jina.ai/duckduckgo). Segment service prefixes fixed (feedbacks/placeholder false positive); fragment survival in strip | ✅ 130/130 tests | `450e15a`, `fc47fa6` |
 
+| **Evidence ranking (TinySearch port, 2026-08-11)** — new `evidence_rank.py`: Unicode-aware chunking with overlap (no tiktoken, chars-per-token approx), BM25 chunk ranking (fail-open: rank_bm25 if installed else builtin BM25Okapi), Jaccard token dedupe + per-source quota with fill (TinySearch chunk_pool_selection semantics), `select_evidence_chunks` replaces blind `text[:4000]` in Step 9 evidence (keeps relevant mid-page passages, drops nav/filler); **agent-reach port** — `is_jina_antibot` detects Jina CAPTCHA/Cloudflare challenge pages in `_fetch_jina` + direct jina fetches (ddg_search ×2, vwe, orchestrator Jina fallback). All fail-open, zero new deps; restore.ps1 updated | ✅ 143/143 tests; verified BM25 picks bio chunk (10.04) over nav (0.0) | `a04e700`, `90368fb` |
+
 Tests: 130/130 pass (98 prior + 32 new: WP-1 skip, content signal, tracking-strip,
 consent cookies, dedup-by-normalize). All modules py_compile clean. Still open (product
 decisions): NEW-8 report size cap.
