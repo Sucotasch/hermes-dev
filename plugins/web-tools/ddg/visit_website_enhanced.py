@@ -760,12 +760,42 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
     parser.parse(html)
     
     # ── Step 4: Extract text ──
-    text = re.sub(r'<[^>]+>', ' ', html)
-    text = re.sub(r'\s+', ' ', text).strip()[:max_chars]
+    # Main-content extraction via trafilatura when installed (cleaner text =
+    # better relevance scores and less boilerplate wasting the 1500-char/page
+    # compact budget). Fail-open: legacy tag-strip fallback otherwise.
+    text = ""
+    try:
+        import trafilatura
+
+        extracted = trafilatura.extract(
+            html,
+            output_format="txt",
+            favor_precision=True,
+            include_comments=False,
+            include_tables=False,
+        )
+        if extracted:
+            text = re.sub(r'\s+', ' ', extracted).strip()
+    except Exception:
+        text = ""
+    if not text:
+        text = re.sub(r'<[^>]+>', ' ', html)
+        text = re.sub(r'\s+', ' ', text).strip()
+    text = text[:max_chars]
 
     # Extract full-size images and JS data (zero-cost: already have HTML)
     fullsize = extract_fullsize_images(html, url)
     js_data = extract_js_data(html)
+
+    # Optional: publication date (htmldate, same author as trafilatura). Used by
+    # news/historical queries for recency-aware ranking. Fail-open.
+    published = ""
+    try:
+        from htmldate import find_date
+
+        published = find_date(url, html) or ""
+    except Exception:
+        published = ""
 
     result = {
         "title": parser.title,
@@ -773,6 +803,7 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
         "links": parser.links[:max_links],
         "images": parser.images[:max_images],
         "content": text,
+        "published": published,
         "source": source,
         "url": url,
     }

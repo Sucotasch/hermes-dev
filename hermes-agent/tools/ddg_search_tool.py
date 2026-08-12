@@ -30,6 +30,11 @@ _VISUAL_RELEVANCE_THRESHOLD = 0.05
 _MIN_TEXT_LENGTH = 300
 _VISUAL_TEXT_LENGTH = 50
 
+# Level-2 expansion saturation guard: stop fetching when pages stop adding
+# new information (token-Jaccard vs already-accepted evidence).
+_SATURATION_JACCARD = 0.7
+_SATURATION_STREAK = 3
+
 
 def _load_by_path(module_name: str, module_file: str):
     abs_path = PLUGINS_DIR / module_file
@@ -141,8 +146,13 @@ def _safe_expand(source_urls, query, max_new_links=25):
     }
 
 
-def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000):
-    """Level-2 expansion + fetch: return candidate list plus fetched page snippets."""
+def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000, baseline_texts=None):
+    """Level-2 expansion + fetch: return candidate list plus fetched page snippets.
+
+    Saturation guard: pages that are near-duplicates of Level-1 evidence or of
+    pages already fetched this round are skipped; after ``_SATURATION_STREAK``
+    consecutive redundant pages the expansion stops (no new information).
+    """
     expand = _safe_expand(
         source_urls=source_urls,
         query=query,
@@ -150,6 +160,14 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
     )
     candidates = expand.get("candidates", [])
     fetched = []
+    try:
+        from selection import is_redundant, token_set
+        _SATURATION = True
+    except Exception:
+        _SATURATION = False
+    # Baseline = already-accepted Level-1 evidence, so Level-2 pages must be NEW.
+    accepted_sets = [token_set(t) for t in (baseline_texts or [])] if _SATURATION else []
+    redundant_streak = 0
     for c in candidates:
         url = c.get("url")
         if not url:
@@ -161,6 +179,14 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
         if not page:
             continue
         text = page.get("text") or page.get("content") or ""
+        if _SATURATION:
+            if is_redundant(text, accepted_sets, threshold=_SATURATION_JACCARD):
+                redundant_streak += 1
+                if redundant_streak >= _SATURATION_STREAK:
+                    break  # saturated: further candidates add no new information
+                continue
+            redundant_streak = 0
+            accepted_sets.append(token_set(text))
         # Level-2 pages get scored with the same content_relevance_score used by the
         # standalone orchestrator, so the quality gates below apply uniformly.
         rel = 0.0
@@ -176,6 +202,7 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
             "text": text[:max_chars],
             "chars": len(text),
             "relevance": rel,
+            "published": page.get("published") or "",
         })
         if len(fetched) >= max_new_links:
             break
@@ -188,12 +215,20 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
 
 
 def _query_variants_wrapper(query, query_type="general"):
-    """Return generated variants; fall back to static heuristics if unavailable."""
+    """Return list of (aspect_label, variant) pairs.
+
+    Uses aspect-based decomposition (query_variants.generate_with_aspects);
+    falls back to plain variants tagged with aspect 'core' if unavailable.
+    """
     try:
         import query_variants
+        if hasattr(query_variants, "generate_with_aspects"):
+            pairs = query_variants.generate_with_aspects(query, query_type=query_type)
+            if pairs:
+                return pairs
         generated = query_variants.generate(query, query_type=query_type)
         if generated:
-            return generated
+            return [("core", q) for q in generated]
     except Exception:
         pass
     base = [query]
@@ -205,7 +240,7 @@ def _query_variants_wrapper(query, query_type="general"):
             f'{tokens[0]} examples',
             f'best {tokens[0]} resources',
         ]
-    return base
+    return [("core", q) for q in base]
 
 
 def _compact_evidence(pages, max_per_page=_COMPACT_PER_PAGE):
@@ -227,6 +262,7 @@ def _compact_evidence(pages, max_per_page=_COMPACT_PER_PAGE):
             "relevance": round(p.get("relevance", 0), 2),
             "summary": summary,
             "alive": p.get("alive", False),
+            "published": p.get("published") or "",
         })
     return compact
 
@@ -237,14 +273,22 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
         return {"error": "ddg backend unavailable"}
 
     variants = _query_variants_wrapper(query, query_type=query_type)
+    # News recency: add a current-year variant so recent content is recalled
+    # (htmldate published dates flow into evidence when available).
+    if query_type == "news" and variants:
+        year = time.strftime("%Y")
+        news_variant = f"{variants[0][1]} {year}"
+        if news_variant.lower() != variants[0][1].lower():
+            variants.append(("recency", news_variant))
 
     seen_page = set()
     pages = []
     alive_count = 0
     raw_count = 0
+    url_rankings = []
     start = time.time()
 
-    for q in variants:
+    for aspect, q in variants:
         try:
             out = search_deep(
                 q,
@@ -257,6 +301,10 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
             )
         except Exception:
             continue
+        # Per-variant ranked URL list for RRF (backend results are relevance-sorted)
+        ranked_urls = [r.get("url") for r in out.get("results", []) if r.get("url")]
+        if ranked_urls:
+            url_rankings.append(ranked_urls)
         for r in out.get("results", []):
             u = r.get("url")
             if not u or u in seen_page:
@@ -273,9 +321,37 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
                 "alive": r.get("alive"),
                 "status": r.get("status"),
                 "source_query": q,
+                "aspect": aspect,
                 # Backend computes this in search_deep (ddg_search._relevance_score, 0-1)
                 "relevance": float(r.get("relevance") or 0.0),
             })
+
+    # Shared selection algorithms (RRF / MMR / title-dedup / saturation).
+    # Fail-open: if the module is unavailable, fall back to legacy behavior.
+    try:
+        from selection import (
+            combine_score,
+            dedupe_by_normalized_title,
+            mmr_select,
+            reciprocal_rank_fusion,
+        )
+        _SELECTION_OK = True
+    except Exception:
+        _SELECTION_OK = False
+
+    if _SELECTION_OK and url_rankings:
+        # Cross-query agreement: pages found by several variants rank higher.
+        rrf = reciprocal_rank_fusion(url_rankings)
+        max_rrf = max(rrf.values()) if rrf else 0.0
+        for p in pages:
+            p["rrf"] = rrf.get(p["url"], 0.0)
+            p["rrf_norm"] = (p["rrf"] / max_rrf) if max_rrf else 0.0
+        # Syndication dedup: same article re-published under different URLs.
+        pages = dedupe_by_normalized_title(pages)
+    else:
+        for p in pages:
+            p["rrf"] = 0.0
+            p["rrf_norm"] = 0.0
 
     level1_time = round(time.time() - start, 2)
 
@@ -291,6 +367,7 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
             source_urls=top_alive,
             max_new_links=max_new_links,
             max_chars=max_chars,
+            baseline_texts=[p.get("text") or p.get("snippet") or "" for p in pages],
         )
         for item in expand_out.get("items", []):
             u = item.get("url")
@@ -315,9 +392,38 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
         and len(p.get("text", "") or p.get("snippet", "") or "") >= min_text
     ]
 
-    # Post-retrieval dedupe + source quotas (Jaccard 0.85 + soft per-domain cap).
-    # Runs BEFORE the budget so deduped pages don't waste budget slots.
-    evidence = _apply_post_retrieval_filter(evidence, query=query, final_limit=MAX_EVIDENCE_PAGES)
+    # Diverse selection: MMR (relevance minus redundancy) instead of a hard
+    # per-domain quota — several distinct threads from one domain survive while
+    # near-duplicate copies are penalised. RRF blends the cross-query signal in.
+    if _SELECTION_OK:
+        # Optional cross-encoder rerank (DDG_RERANK=1 + deps installed):
+        # blends a neural relevance signal into the selection score.
+        ce_scores = {}
+        try:
+            from selection import cross_encoder_scores
+            ce_scores = cross_encoder_scores(query, evidence)
+        except Exception:
+            ce_scores = {}
+        for p in evidence:
+            p.setdefault("rrf_norm", 0.0)
+            base = combine_score(
+                float(p.get("relevance") or 0.0), float(p.get("rrf_norm") or 0.0)
+            )
+            ce = ce_scores.get(p.get("url"))
+            p["_sel_score"] = base if ce is None else 0.5 * base + 0.5 * ce
+        evidence = mmr_select(
+            evidence,
+            k=MAX_EVIDENCE_PAGES,
+            rel_key="_sel_score",
+            text_keys=("title", "text", "snippet"),
+            aspect_key="aspect",
+        )
+        for p in evidence:
+            p.pop("_sel_score", None)
+    else:
+        evidence = _apply_post_retrieval_filter(
+            evidence, query=query, final_limit=MAX_EVIDENCE_PAGES
+        )
 
     # ── Evidence budget: cap pages + chars to protect Hermes context ──
     # Sort by relevance descending and fill the budget. Budget measures the
@@ -357,7 +463,7 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
 
     return {
         "query": query,
-        "variants_used": variants,
+        "variants_used": [q for _, q in variants],
         "panel": {
             "raw": raw_count,
             "alive": alive_count,
@@ -368,6 +474,14 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
         },
         "pages": compact_evidence,
         "images": images,
+        # Anti-hallucination guidance for the synthesizing LLM (adapted from
+        # the claude-deep-research-skill quality gates).
+        "synthesis_notes": (
+            "Attribute every factual claim to its source index [1..N] in the same sentence. "
+            "Separate source-grounded facts from your own synthesis and label speculation "
+            "as such. Avoid vague attribution (studies show, experts say) — name the source. "
+            "If no source covers a point, state that explicitly instead of inventing references."
+        ),
     }
 
 

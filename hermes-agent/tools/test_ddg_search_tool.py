@@ -176,3 +176,83 @@ def test_budget_caps_pages_and_compacted_chars(monkeypatch):
     total = sum(len(p["summary"]) for p in out["pages"])
     assert total <= ddg.MAX_EVIDENCE_CHARS
     assert total > 24000                      # budget actually filled
+
+
+# ── RRF / title dedup / saturation (new selection pipeline) ───────────────
+
+def test_title_dedup_collapses_syndicated_copies(monkeypatch):
+    # same normalized title, different URLs/domains — only first survives
+    pages = [
+        {"url": f"https://site{i}.com/page", "title": "Qwen 27B Guide | News",
+         "snippet": "Qwen3.6-27B llama.cpp settings " * 4,
+         "text": f"Qwen3.6-27B llama.cpp best settings for 16GB VRAM. tok{i} filler " * 80,
+         "alive": True, "status": 200, "relevance": 0.9}
+        for i in range(5)
+    ]
+    monkeypatch.setattr(ddg, "search_deep", _make_fake_search(pages))
+    out = ddg._safe_deep_research("Qwen3.6-27B llama.cpp best settings", query_type="technical")
+    assert len(out["pages"]) == 1            # 5 syndicated copies -> 1
+
+
+def test_aspect_decomposition_balances_facets(monkeypatch):
+    # Per-aspect fake results: aspect A pages are more relevant than aspect B,
+    # but MMR's aspect bonus must pull one B page into the selection.
+    import query_variants
+
+    pairs = query_variants.generate_with_aspects("Qwen3.6-27B llama.cpp settings",
+                                                  query_type="technical")
+    aspects = [a for a, _ in pairs]
+    assert aspects[0] == "core"
+    assert len(aspects) >= 3                 # core + several facets
+
+    def fake(q, validate=True, classify=False, max_validate=200,
+             query_variants=None, compose=False, query_type=None):
+        base = [p for a, p in pairs].index(q) if q in [p for a, p in pairs] else 0
+        text = f"Qwen3.6-27B llama.cpp settings for 16GB VRAM context 64k. tok{base} filler " * 60
+        rel = 0.9 if base in (0, 1) else 0.85   # core + first aspect slightly more relevant
+        return {"results": [{"url": f"https://site{base}{i}.com/page",
+                             "title": f"Page {base}-{i}", "snippet": "Qwen3.6-27B llama.cpp " * 4,
+                             "text": text, "alive": True, "status": 200,
+                             "relevance": rel} for i in range(6)]}
+
+    monkeypatch.setattr(ddg, "search_deep", fake)
+    out = ddg._safe_deep_research("Qwen3.6-27B llama.cpp settings", query_type="technical")
+    # Selection must span pages from several aspect variants (site{b} prefixes)
+    urls = [p["url"] for p in out["pages"]]
+    bases = {u.split("site")[1][0] for u in urls if "site" in u}
+    assert len(bases) >= 2
+    assert len(out["pages"]) >= 2
+
+
+def test_news_query_adds_current_year_variant(monkeypatch):
+    pages = [_fake_result(i, 0.9, text_len=800) for i in range(15)]
+    monkeypatch.setattr(ddg, "search_deep", _make_fake_search(pages))
+    out = ddg._safe_deep_research("Qwen 27B release news", query_type="news")
+    year = __import__("time").strftime("%Y")
+    assert any(year in v for v in out["variants_used"])
+    assert out["pages"]                            # pipeline still returns evidence
+    assert "[1..N]" in out["synthesis_notes"]      # anti-hallucination guidance present
+
+
+def test_expand_saturation_stops_on_redundant_pages(monkeypatch):
+    monkeypatch.setattr(ddg, "_is_coverage_sufficient", lambda *a, **k: False)  # force expand
+
+    def visit(url, **kw):
+        if "candidate" in url:
+            text = "Qwen3.6-27B llama.cpp best settings for 16GB VRAM context 64k quantization " * 30
+            return {"url": url, "title": "Expand page", "text": text, "links": []}
+        return {
+            "url": url, "title": "Source", "text": "Qwen3.6-27B llama.cpp settings " * 20,
+            "links": [{"url": f"https://candidate{i}.example.com/{i}",
+                        "text": "Qwen3.6-27B llama.cpp settings 16GB VRAM"} for i in range(5)],
+        }
+
+    monkeypatch.setattr(ddg, "visit_website_enhanced", visit)
+    pages = [_fake_result(i, 0.9, text_len=800) for i in range(5)]  # alive=5 < 15
+    monkeypatch.setattr(ddg, "search_deep", _make_fake_search(pages))
+
+    out = ddg._safe_deep_research("Qwen3.6-27B llama.cpp best settings 16Gb VRAM",
+                                  query_type="technical")
+    # 5 identical expand pages: first is new, next ones are redundant -> 1 fetched
+    expand_urls = [p["url"] for p in out["pages"] if p["url"].startswith("https://candidate")]
+    assert len(expand_urls) == 1
