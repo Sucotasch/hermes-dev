@@ -1,49 +1,54 @@
-# Hermes Custom Tools — Autonomous Recovery
+# Hermes Custom Tools - One-Button Restore
 
-**Canonical repo:** `D:\Arx\Software Downloads\Hermes copy\hermes-dev`  
-**CONTEXT:** `D:\Arx\Software Downloads\Hermes copy\hermes-dev\CONTEXT.md`  
+**Dev repo:** `D:\Arx\Software Downloads\Hermes copy\hermes-dev`
 **Restore script:** `D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1`
+**Health check:** `D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore_check.py`
 
 ## What this is
-Production-grade recovery kit for Hermes custom DDG integration. Used when Hermes updates break or wipe context, or when resuming development after a session reset.
 
-## What gets restored
-`C:\Users\sucot\.hermes\` gets these files from repo:
-- `hermes-agent/tools/ddg_search_tool.py`
-- `hermes-agent/tools/browser_dialog_tool.py`
-- `plugins/web-tools/ddg/ddg_search.py`
-- `plugins/web-tools/ddg/visit_website_enhanced.py`
-- `CONTEXT.md`
-- `skills/restore-context/SKILL.md`
-- `skills/web-deep-search/SKILL.md`
+A one-button recovery kit for the custom deep-search pipeline in Hermes.
+The running Hermes loads its tools, plugins and skills from
+`C:\Users\sucot\.hermes\`. After a Hermes update or reinstall that pipeline
+is gone or broken. Running restore.ps1 re-connects it from this repo (the
+source of truth, also in git) and verifies the result.
 
-## Quick recovery
-Run this to restore custom tools and context:
-```powershell
-powershell.exe -File 'D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1'
+No backups are made (v3): the repo is the source of truth. Roll back a bad
+sync with `git checkout` + re-run restore.
+
+## What the script does
+
+1. Sync the manifest files into `~/.hermes`: tools (ddg_search_tool,
+   browser_dialog_tool), the DDG web plugins (plugins/web-tools/ddg),
+   resources, skills, and context. (CONTEXT.md is currently absent from
+   the repo - the script logs a warning and skips it.)
+2. Install missing Python packages into the Hermes venv (ddgs,
+   beautifulsoup4, trafilatura, htmldate, lxml) - updates often recreate
+   the venv and wipe them.
+3. py_compile every synced file.
+4. Run restore_check.py for the verdict: all 5 tools registered
+   (web_search_deep, web_expand_and_fetch, visit_website_tool, image_search,
+   web_deep_research) and all deps importable. Prints OK / BROKEN,
+   exit code 0/1.
+
+## Usage
+
+```
+powershell.exe -File "...\restore.ps1"          # full check + restore
+powershell.exe -File "...\restore.ps1" -DryRun  # show actions, change nothing
+powershell.exe -File "...\restore.ps1" -RunSmoke  # also live compose probe
 ```
 
-Dry-run first (safe):
-```powershell
-powershell.exe -File 'D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1' -DryRun -SkipBackup -NoStopHermes
-```
-
-## After restore
-Verify with:
-```powershell
-cd C:\Users\sucot\.hermes
-python -m py_compile plugins\web-tools\ddg\ddg_search.py
-python -m py_compile plugins\web-tools\ddg\visit_website_enhanced.py
-python -m py_compile hermes-agent\tools\ddg_search_tool.py
-```
+The GUI (standalone/gui.py, "Check & Restore" button) calls the same script
+(`-SkipBackup` is accepted for compatibility and does nothing).
 
 ## Development workflow
-1. Edit files in `D:\Arx\Software Downloads\Hermes copy\hermes-dev\` only
-2. `git add/commit` in repo
-3. Run restore.ps1 to apply
 
-## Last known state
-Date: 2026-06-12  
-State: `web_search_deep` working, `visit_website_tool` working, `image_search` working.  
-All anti-bot fixes applied: impersonation rotation, DNS circuit breaker, proxy retry, JS-block detection, content relevance scoring, domain blocklist, full-size image extraction, overlay bypass expansion.  
-Skill cleaned: 776 → 706 lines, 7 duplicates removed.
+1. Edit files in this repo only.
+2. `git add/commit` in the repo.
+3. Run restore.ps1 (or the GUI button) to apply to Hermes.
+
+## Verify without running the script
+
+```
+C:\Users\sucot\.hermes\hermes-agent\venv\Scripts\python.exe restore_check.py
+```

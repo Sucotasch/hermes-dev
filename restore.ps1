@@ -1,26 +1,31 @@
-# Restore custom Hermes tools from external dev repo.
+# Restore custom Hermes deep-search pipeline from the dev repo.
 #
-# v2 - fast, deterministic, safe:
-#   * Backs up ONLY the files it is about to overwrite (the 15-file manifest
-#     below). The old version recursively copied the ENTIRE ~/.hermes (6+ GB,
-#     128k files) on every run - 30+ minutes, and restoring that snapshot
-#     could clobber runtime state (caches, venv, auth) with stale copies.
-#   * Smoke probe (live deep research) is OFF by default - it needs the
-#     network and adds minutes. Pass -RunSmoke to enable.
-#   * Every step is bounded: py_compile and the probe run under hard timeouts,
-#     so the script can never hang silently.
+# One-button tool: run it (directly, or via the GUI "Check & Restore"
+# button) after a Hermes update/reinstall, or whenever the pipeline looks
+# broken. It:
+#   1. syncs custom tools, web plugins, skills and CONTEXT.md into ~/.hermes
+#   2. installs missing Python packages into the Hermes venv (ddgs, bs4,
+#      trafilatura, htmldate, lxml) - venv is often recreated by updates
+#   3. py_compile-checks every synced file
+#   4. runs restore_check.py for the final verdict: are all 5 tools
+#      registered and are all deps importable? Prints OK/BROKEN.
+#
+# No backups in v3: the repo is the source of truth (and it is in git).
+# -SkipBackup is accepted for GUI compatibility and does nothing.
+# Hermes is NOT stopped by default (use -StopHermes); -NoStopHermes is
+# accepted for GUI compatibility and does nothing either.
 #
 # Usage:
-#   .\restore.ps1              # stop hermes, backup 15 files, sync, py_compile
+#   .\restore.ps1              # full check + restore
 #   .\restore.ps1 -DryRun      # show what would happen, change nothing
 #   .\restore.ps1 -RunSmoke    # also run the live compose smoke probe
-#   .\restore.ps1 -NoBackup    # skip even the file-level backup
 #   .\restore.ps1 -NoStopHermes
 param(
     [switch]$DryRun,
     [switch]$NoStopHermes,
-    [switch]$NoBackup,
-    [switch]$RunSmoke
+    [switch]$StopHermes,
+    [switch]$RunSmoke,
+    [Alias('SkipBackup')] [switch]$NoBackup
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -34,17 +39,34 @@ function Log($msg) {
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Stop-HermesIfRunning {
-    if ($NoStopHermes) {
-        Log 'Skipping Hermes stop (NoStopHermes).'
+    # Opt-in: WMI (Get-CimInstance) is unreliable on some systems, so the
+    # default path never touches it. Files are loaded at import time and are
+    # safe to overwrite while Hermes runs. The GUI passes -NoStopHermes.
+    if (-not $StopHermes) {
+        Log 'Not stopping Hermes (default; use -StopHermes to stop first).'
+        return
+    }
+    if ($DryRun) {
+        Log 'Skipping Hermes stop (DryRun - nothing changes).'
         return
     }
     Log 'Attempting to stop Hermes process...'
-    # Scope tightly: only hermes-named processes, or python/node whose
-    # command line references hermes. Never kill unrelated python/node work.
-    $procs = Get-CimInstance Win32_Process | Where-Object {
-        $_.Name -match 'hermes|gui_launcher' -or
-        (($_.Name -match '^python|^node') -and $_.CommandLine -match 'hermes')
+    # Bounded: run the query in a background job with a 15s cap, continue
+    # either way so the script can never hang on process enumeration.
+    $job = Start-Job -ScriptBlock {
+        Get-CimInstance Win32_Process | Where-Object {
+            $_.Name -match 'hermes|gui_launcher' -or
+            (($_.Name -match '^python|^node') -and $_.CommandLine -match 'hermes')
+        }
     }
+    $procs = $null
+    if (Wait-Job -Id $job.Id -Timeout 15 -ErrorAction SilentlyContinue) {
+        $procs = Receive-Job -Id $job.Id -ErrorAction SilentlyContinue
+    } else {
+        Log 'Process query timed out (WMI) - skipping stop, continuing.'
+        Stop-Job -Id $job.Id -ErrorAction SilentlyContinue
+    }
+    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
     if ($procs) {
         foreach ($p in $procs | Select-Object -First 5) {
             Log "Found process: $($p.Name) (PID $($p.ProcessId))"
@@ -69,12 +91,15 @@ if (-not (Test-Path $RepoRoot))   { Log "ERROR: Repo not found at $RepoRoot"; ex
 if (-not (Test-Path $HermesHome)) { Log "ERROR: Hermes home not found at $HermesHome"; exit 1 }
 
 $Venv = Join-Path $HermesHome 'hermes-agent\venv\Scripts\python.exe'
+$CheckPy = Join-Path $RepoRoot 'restore_check.py'
+$HadFailure = $false
 
 Log "Repo: $RepoRoot"
 Log "Hermes: $HermesHome"
 if ($DryRun) { Log 'Running in DryRun mode; no changes applied.' }
+if ($NoBackup) { Log 'Note: backups were removed in v3 (git repo is the source of truth).' }
 
-# ---- Manifest: exactly what we sync (and therefore what we back up) --------
+# ---- Manifest: exactly what we sync (repo wins) ------------------------------
 $Files = @(
     @{ Repo = 'hermes-agent\tools\ddg_search_tool.py'; Dest = 'hermes-agent\tools\ddg_search_tool.py' }
     @{ Repo = 'hermes-agent\tools\browser_dialog_tool.py'; Dest = 'hermes-agent\tools\browser_dialog_tool.py' }
@@ -97,36 +122,12 @@ $Files = @(
 
 Stop-HermesIfRunning
 
-# ---- Backup: ONLY the files we are about to overwrite (seconds) ------------
-if ($NoBackup) {
-    Log 'Skipping backup (NoBackup).'
-} elseif (-not $DryRun) {
-    $backupDirBase = Join-Path (Split-Path -Parent $HermesHome) 'Hermes_Backups'
-    New-Item -Path $backupDirBase -ItemType Directory -Force | Out-Null
-    $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $backupDir = Join-Path $backupDirBase "restore-backup-$ts"
-    New-Item -Path $backupDir -ItemType Directory -Force | Out-Null
-    $backedUp = 0
-    foreach ($f in $Files) {
-        $dst = Join-Path $HermesHome $f.Dest
-        if (-not (Test-Path $dst)) { continue }
-        $bak = Join-Path $backupDir $f.Dest
-        $bakDir = Split-Path $bak -Parent
-        New-Item -Path $bakDir -ItemType Directory -Force | Out-Null
-        Copy-Item $dst $bak -Force
-        $backedUp++
-    }
-    Log "Backed up $backedUp files (only manifest targets) -> $backupDir"
-} else {
-    Log 'DRY-RUN: backup would cover only manifest targets.'
-}
-
-# ---- Sync ----------------------------------------------------------------
+# ---- 1) Sync ----------------------------------------------------------------
 foreach ($f in $Files) {
     $src = Join-Path $RepoRoot $f.Repo
     $dst = Join-Path $HermesHome $f.Dest
     if (-not (Test-Path $src)) {
-        Log "MISSING source: $src"
+        Log "WARNING: missing in repo (skipping): $($f.Repo)"
         continue
     }
     $dstDir = Split-Path $dst -Parent
@@ -137,12 +138,45 @@ foreach ($f in $Files) {
         Log "DRY-RUN copy: $($f.Repo)"
     } else {
         Copy-Item $src $dst -Force
-        Log "Restored: $($f.Repo)"
+        Log "Synced: $($f.Repo)"
     }
 }
 
-# ---- Compile checks (bounded) ---------------------------------------------
-$HadFailure = $false
+# ---- 2) Dependencies (only install what is missing; offline-safe reruns) -----
+if (Test-Path $Venv) {
+    $Deps = @(
+        @{ Pkg = 'ddgs';          Mod = 'ddgs' }
+        @{ Pkg = 'beautifulsoup4'; Mod = 'bs4' }
+        @{ Pkg = 'trafilatura';   Mod = 'trafilatura' }
+        @{ Pkg = 'htmldate';      Mod = 'htmldate' }
+        @{ Pkg = 'lxml';          Mod = 'lxml' }
+    )
+    foreach ($d in $Deps) {
+        & $Venv -c "import $($d.Mod)" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Log "dep OK: $($d.Mod)"
+            continue
+        }
+        if ($DryRun) {
+            Log "DRY-RUN would install: $($d.Pkg)"
+            continue
+        }
+        Log "dep missing: $($d.Mod) - installing $($d.Pkg) ..."
+        $pipOut = & $Venv -m pip install --disable-pip-version-check --timeout 30 $d.Pkg 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Log "dep installed: $($d.Mod)"
+        } else {
+            Log "dep INSTALL FAILED: $($d.Pkg)"
+            $pipOut | Select-Object -Last 6 | ForEach-Object { Log "    $_" }
+            $HadFailure = $true
+        }
+    }
+} else {
+    Log "WARNING: venv not found at $Venv - cannot install deps"
+    $HadFailure = $true
+}
+
+# ---- 3) Compile checks (bounded) ---------------------------------------------
 $Targets = @(
     'plugins\web-tools\ddg\ddg_search.py',
     'plugins\web-tools\ddg\visit_website_enhanced.py',
@@ -152,14 +186,16 @@ $Targets = @(
     'plugins\web-tools\ddg\junk_filter.py',
     'plugins\web-tools\ddg\discovery.py',
     'plugins\web-tools\ddg\evidence_rank.py',
+    'plugins\web-tools\ddg\_coverage.py',
     'plugins\web-tools\ddg\_common.py',
-    'hermes-agent\tools\ddg_search_tool.py'
+    'hermes-agent\tools\ddg_search_tool.py',
+    'hermes-agent\tools\browser_dialog_tool.py'
 )
 if (Test-Path $Venv) {
     foreach ($rel in $Targets) {
         $path = Join-Path $HermesHome $rel
         if (-not (Test-Path $path)) {
-            Log "MISSING target for compile check: $path"
+            Log "MISSING target for compile check: $rel"
             $HadFailure = $true
             continue
         }
@@ -168,8 +204,7 @@ if (Test-Path $Venv) {
             continue
         }
         # Direct invocation: Start-Process + -Redirect* swallows the child
-        # exit code on some Windows builds (all checks showed FAILED with
-        # empty errors even though py_compile succeeds). Plain & is reliable.
+        # exit code on some Windows builds. Plain & is reliable.
         $pyOutput = & $Venv -m py_compile $path 2>&1
         $compileExit = $LASTEXITCODE
         if ($compileExit -eq 0) {
@@ -179,11 +214,33 @@ if (Test-Path $Venv) {
             $HadFailure = $true
         }
     }
-} else {
-    Log "WARNING: venv not found at $Venv - skipping compile checks"
 }
 
-# ---- Optional live smoke probe (off by default; needs network) -------------
+# ---- 4) Final verdict: are the tools really live? ----------------------------
+if (Test-Path $CheckPy) {
+    if ($DryRun) {
+        Log 'DRY-RUN would run: pipeline health check (restore_check.py)'
+    } elseif (Test-Path $Venv) {
+        Log 'Running pipeline health check...'
+        $chkOut = & $Venv $CheckPy 2>&1
+        $chkExit = $LASTEXITCODE
+        foreach ($line in $chkOut) { Log "  $line" }
+        if ($chkExit -ne 0) {
+            Log 'VERDICT: pipeline NOT restored - review log above'
+            $HadFailure = $true
+        } else {
+            Log 'VERDICT: pipeline OK - all tools registered, deps present'
+        }
+    } else {
+        Log 'VERDICT: cannot check (no venv)'
+        $HadFailure = $true
+    }
+} else {
+    Log "MISSING restore_check.py next to restore.ps1 ($CheckPy)"
+    $HadFailure = $true
+}
+
+# ---- Optional live smoke probe (off by default; needs network) ---------------
 if ($RunSmoke -and -not $DryRun -and -not $HadFailure) {
     $Probe = Join-Path $HermesHome 'hermes-dev\deep_test_vargas.py'
     if (Test-Path $Probe) {
@@ -210,7 +267,7 @@ if ($RunSmoke -and -not $DryRun -and -not $HadFailure) {
 
 $sw.Stop()
 
-# ---- Save restore log -------------------------------------------------------
+# ---- Save restore log --------------------------------------------------------
 $logDir = Join-Path $HermesHome '.restore-log'
 New-Item -Path $logDir -ItemType Directory -Force | Out-Null
 $logFile = Join-Path $logDir ("restore_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
@@ -219,7 +276,8 @@ Log "Log saved to $logFile"
 $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 Log ('Restore finished in ' + $secs + 's.')
 if ($HadFailure) {
-    Log 'Warning: some steps failed. Review log above.'
+    Log 'Result: BROKEN - see log. Run again with internet if deps failed.'
     exit 1
 }
+Log 'Result: OK'
 exit 0

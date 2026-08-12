@@ -216,10 +216,11 @@ class HermesCheckThread(QThread):
             return
 
         try:
+            # 300s: restore also installs missing venv deps on first run.
             result = subprocess.run(
                 ["powershell.exe", "-ExecutionPolicy", "Bypass",
                  "-File", restore_script, "-SkipBackup", "-NoStopHermes"],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=300,
             )
             for line in result.stdout.splitlines():
                 self.log.emit(f"  {line}")
