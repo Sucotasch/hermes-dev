@@ -17,20 +17,19 @@ or after a Hermes update that may have removed custom integrations.
 ## Source of truth
 
 - Repo: `D:\Arx\Software Downloads\Hermes copy\hermes-dev`
-- Context file: `D:\Arx\Software Downloads\Hermes copy\hermes-dev\CONTEXT.md`
+- Project knowledge: `D:\Arx\Software Downloads\Hermes copy\hermes-dev\knowledge.md`
 - Restore script: `D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1`
 
 ## Recovery flow
 
-1. Read `D:\Arx\Software Downloads\Hermes copy\hermes-dev\CONTEXT.md`.
-2. If present, also read `C:\Users\sucot\.hermes\CONTEXT.md` (restore copies it there).
-3. Run restoration:
-   - Dry run first: `powershell.exe -File 'D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1' -DryRun -SkipBackup -NoStopHermes`
+1. Read `D:\Arx\Software Downloads\Hermes copy\hermes-dev\knowledge.md`.
+2. Run restoration:
+   - Dry run first: `powershell.exe -File 'D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1' -DryRun`
    - Then real restore: `powershell.exe -File 'D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1'`
-4. After restore, verify:
+3. After restore, verify:
    - `python -m py_compile` for key files
    - registry discovery shows `web_search_deep`, `visit_website_tool`, `image_search`
-5. Continue development from repo, not from live `~/.hermes` edits.
+4. Continue development from repo, not from live `~/.hermes` edits.
 
 ## Rules
 

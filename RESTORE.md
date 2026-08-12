@@ -19,8 +19,7 @@ sync with `git checkout` + re-run restore.
 
 1. Sync the manifest files into `~/.hermes`: tools (ddg_search_tool,
    browser_dialog_tool), the DDG web plugins (plugins/web-tools/ddg),
-   resources, skills, and context. (CONTEXT.md is currently absent from
-   the repo - the script logs a warning and skips it.)
+   resources, and skills.
 2. Install missing Python packages into the Hermes venv (ddgs,
    beautifulsoup4, trafilatura, htmldate, lxml) - updates often recreate
    the venv and wipe them.

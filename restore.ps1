@@ -3,7 +3,7 @@
 # One-button tool: run it (directly, or via the GUI "Check & Restore"
 # button) after a Hermes update/reinstall, or whenever the pipeline looks
 # broken. It:
-#   1. syncs custom tools, web plugins, skills and CONTEXT.md into ~/.hermes
+#   1. syncs custom tools, web plugins and skills into ~/.hermes
 #   2. installs missing Python packages into the Hermes venv (ddgs, bs4,
 #      trafilatura, htmldate, lxml) - venv is often recreated by updates
 #   3. py_compile-checks every synced file
@@ -115,7 +115,6 @@ $Files = @(
     @{ Repo = 'plugins\web-tools\ddg\evidence_rank.py'; Dest = 'plugins\web-tools\ddg\evidence_rank.py' }
     @{ Repo = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json'; Dest = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json' }
     @{ Repo = 'plugins\web-tools\ddg\resources\junk_allowlist.txt'; Dest = 'plugins\web-tools\ddg\resources\junk_allowlist.txt' }
-    @{ Repo = 'CONTEXT.md'; Dest = 'CONTEXT.md' }
     @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
     @{ Repo = 'skills\web-deep-search\SKILL.md'; Dest = 'skills\web-deep-search\SKILL.md' }
 )
