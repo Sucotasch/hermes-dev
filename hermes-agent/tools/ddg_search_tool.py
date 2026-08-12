@@ -17,6 +17,19 @@ from tools.registry import registry
 HERMES_DIR = Path(__file__).resolve().parents[2]
 PLUGINS_DIR = HERMES_DIR / "plugins" / "web-tools" / "ddg"
 
+# Context budget for Hermes Agent (~92K minus ~20-25K Hermes instructions = ~67K available).
+# web_deep_research returns evidence + panel + variants + images; budget keeps total < 35K chars.
+MAX_EVIDENCE_CHARS = 28000       # ~18 pages × ~1500 compacted chars; head-room for panel/variants/images
+MAX_EVIDENCE_PAGES = 18          # quality-over-quantity: fewer high-relevance pages > 40+ mediocre
+_COMPACT_PER_PAGE = 1500         # per-page text cap applied by _compact_evidence (LLM-facing size)
+
+# Relevance/text gates mirror the standalone orchestrator (visual 0.05/50 chars, others 0.15/300):
+# visual topics are scored softer — image-heavy pages carry less text and keyword overlap.
+_MIN_RELEVANCE_THRESHOLD = 0.15
+_VISUAL_RELEVANCE_THRESHOLD = 0.05
+_MIN_TEXT_LENGTH = 300
+_VISUAL_TEXT_LENGTH = 50
+
 
 def _load_by_path(module_name: str, module_file: str):
     abs_path = PLUGINS_DIR / module_file
@@ -148,12 +161,21 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000)
         if not page:
             continue
         text = page.get("text") or page.get("content") or ""
+        # Level-2 pages get scored with the same content_relevance_score used by the
+        # standalone orchestrator, so the quality gates below apply uniformly.
+        rel = 0.0
+        try:
+            if _search is not None:
+                rel = round(_search.content_relevance_score(query, text), 2)
+        except Exception:
+            rel = 0.0
         fetched.append({
             "url": url,
             "title": page.get("title") or c.get("anchor") or url,
             "anchor": c.get("anchor"),
             "text": text[:max_chars],
             "chars": len(text),
+            "relevance": rel,
         })
         if len(fetched) >= max_new_links:
             break
@@ -186,12 +208,12 @@ def _query_variants_wrapper(query, query_type="general"):
     return base
 
 
-def _compact_evidence(pages, max_per_page=1500):
+def _compact_evidence(pages, max_per_page=_COMPACT_PER_PAGE):
     """Compress evidence pack: truncated text + metadata instead of full text.
 
     Returns compact list with summary, url, title, relevance.
-    1500 chars balances context usage (25 pages × 1500 = 37,500 chars) with
-    content depth for local 92k models (72k usable after Hermes overhead).
+    1500 chars/page balances context usage (18 pages × 1500 = 27,000 chars) with
+    content depth for local 92k models (≈67k usable after Hermes overhead).
     """
     compact = []
     for p in pages:
@@ -251,6 +273,8 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
                 "alive": r.get("alive"),
                 "status": r.get("status"),
                 "source_query": q,
+                # Backend computes this in search_deep (ddg_search._relevance_score, 0-1)
+                "relevance": float(r.get("relevance") or 0.0),
             })
 
     level1_time = round(time.time() - start, 2)
@@ -277,9 +301,43 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
 
     evidence = pages + expand_items
 
-    # Post-retrieval dedupe + source quotas (based on TinySearch chunk pool selection).
-    # Outcome: Jasper reducer for duplicated content and single-source bias.
-    evidence = _apply_post_retrieval_filter(evidence, query=query, final_limit=25)
+    # ── Quality-first filtering: relevance threshold + minimum content length ──
+    # Mirrors the standalone orchestrator gates (visual 0.05/50 chars, others 0.15/300):
+    # keep only pages with real topical overlap and enough depth to be useful.
+    # `relevance` comes from the backend (ddg_search._relevance_score) for Level-1 pages
+    # and from content_relevance_score for Level-2 expand items.
+    is_visual_q = query_type == "visual"
+    min_rel = _VISUAL_RELEVANCE_THRESHOLD if is_visual_q else _MIN_RELEVANCE_THRESHOLD
+    min_text = _VISUAL_TEXT_LENGTH if is_visual_q else _MIN_TEXT_LENGTH
+    evidence = [
+        p for p in evidence
+        if p.get("relevance", 0) >= min_rel
+        and len(p.get("text", "") or p.get("snippet", "") or "") >= min_text
+    ]
+
+    # Post-retrieval dedupe + source quotas (Jaccard 0.85 + soft per-domain cap).
+    # Runs BEFORE the budget so deduped pages don't waste budget slots.
+    evidence = _apply_post_retrieval_filter(evidence, query=query, final_limit=MAX_EVIDENCE_PAGES)
+
+    # ── Evidence budget: cap pages + chars to protect Hermes context ──
+    # Sort by relevance descending and fill the budget. Budget measures the
+    # COMPACTED text the LLM actually receives (≤ _COMPACT_PER_PAGE per page),
+    # so MAX_EVIDENCE_PAGES × _COMPACT_PER_PAGE ≤ MAX_EVIDENCE_CHARS holds consistently.
+    evidence.sort(key=lambda p: p.get("relevance", 0), reverse=True)
+    budget_char_used = 0
+    evidence_budget = []
+    for p in evidence:
+        if len(evidence_budget) >= MAX_EVIDENCE_PAGES:
+            break
+        text = p.get("text", "") or p.get("snippet", "") or ""
+        page_chars = min(len(text), _COMPACT_PER_PAGE)
+        if page_chars <= 0:
+            continue
+        if budget_char_used + page_chars > MAX_EVIDENCE_CHARS:
+            continue  # this page alone doesn't fit; smaller pages may
+        evidence_budget.append(p)
+        budget_char_used += page_chars
+    evidence = evidence_budget
 
     images = []
     if query_type == "visual" and image_search is not None:
@@ -330,7 +388,11 @@ def _apply_post_retrieval_filter(evidence, query, final_limit=80):
         union = len(a | b)
         return inter / union if union else 0.0
 
-    max_per_source_url = 4
+    # Soft per-domain cap: Jaccard dedup below is the real anti-repetition gate,
+    # so this only prevents single-source dominance. 6 allows several genuinely
+    # distinct threads from one domain (e.g. multiple Reddit threads on the same
+    # topic) without letting one source fill the context. Tunable.
+    max_per_source_url = 6
     jaccard_threshold = 0.85
 
     try:
@@ -526,7 +588,7 @@ registry.register(
     ),
     check_fn=lambda: visit_website_enhanced is not None,
     emoji="🔗🌐",
-    max_result_size_chars=40000,
+    max_result_size_chars=16000,
 )
 
 registry.register(
@@ -567,5 +629,5 @@ registry.register(
     ),
     check_fn=lambda: search_deep is not None and visit_website_enhanced is not None,
     emoji="🧠",
-    max_result_size_chars=60000,
+    max_result_size_chars=32000,
 )
