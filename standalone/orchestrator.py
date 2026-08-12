@@ -757,6 +757,18 @@ def _filter_images_for_report(images, log=None):
             log(f"    Image filter: skipped (Pillow not installed) — keeping {len(images)} images")
         return images
 
+    # This phase downloads every candidate image (3s timeout each) to check
+    # format/hash/size. For visual queries that can be hundreds of downloads
+    # and several minutes — log progress so the GUI bar moves and the run
+    # never looks hung.
+    if log:
+        log(f"    Image filter: checking {len(images)} images (Pillow enabled)...")
+    _filter_t0 = time.monotonic()
+
+    def _log_progress(done, total, phase="direct"):
+        if log and (done % 100 == 0 or done == total):
+            log(f"      {phase}: {done}/{total} checked ({time.monotonic() - _filter_t0:.0f}s)")
+
     def _is_skippable(url):
         url_lower = url.lower().split('?')[0]
         return any(url_lower.endswith(ext) for ext in SKIP_FORMATS)
@@ -790,7 +802,10 @@ def _filter_images_for_report(images, log=None):
             return None
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        results = list(ex.map(_process_phase1, images))
+        results = []
+        for i, r in enumerate(ex.map(_process_phase1, images), 1):
+            results.append(r)
+            _log_progress(i, len(images), "direct download")
 
     for r in results:
         if r is None:
@@ -826,8 +841,13 @@ def _filter_images_for_report(images, log=None):
             except:
                 return None
 
+        if log:
+            log(f"      proxy retry: {len(quarantine)} images...")
         with ThreadPoolExecutor(max_workers=3) as ex:
-            results = list(ex.map(_process_phase2, quarantine))
+            results = []
+            for i, r in enumerate(ex.map(_process_phase2, quarantine), 1):
+                results.append(r)
+                _log_progress(i, len(quarantine), "proxy retry")
 
         for r in results:
             if r is None:
