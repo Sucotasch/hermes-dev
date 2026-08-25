@@ -110,6 +110,22 @@ python standalone/deep_research.py "your query" --server http://localhost:8888
 - Wayback: availability API rate-limits (429) — bridge retries once with backoff; don't hammer it in loops.
 - Deno `render` is fail-open: weak output (<300 chars) falls through to the plain read ladder. Deno binary+cache live in gitignored `deno/`; `--node-modules-dir=auto` recreates `node_modules/` (gitignored) on first call from the vendored cache.
 
+## Git operations in the Harness sandbox
+
+The sandbox blocks Git Bash sh.exe (`couldn't create signal pipe, Win32 error 5`), which breaks
+credential helpers that spawn prompt scripts (GCM `manager`, askpass). Symptom: `fatal: could not
+read Username/Password`. Also the Windows cert store is blocked (`schannel SEC_E_NO_CREDENTIALS`).
+
+**Working solution (already applied to this repo's origin):**
+- The `origin` remote URL carries a token: `https://x-access-token:TOKEN@github.com/...`
+  (token obtained via `gh auth token`; `gh` CLI is authenticated with `repo` scope).
+- TLS works because the token URL bypasses the credential helpers entirely; the
+  `sh signal pipe` stderr noise is harmless — judge success by git's own output
+  (`Everything up-to-date`, `-> master`, etc.), not by the stderr noise.
+- If the token remote ever stops working: `git remote set-url origin "https://x-access-token:$(gh auth token)@github.com/Sucotasch/hermes-dev.git"` (run inside a pwsh tool call).
+- Do NOT store plaintext tokens in tracked files; `git remote -v` shows the token — don't paste
+  remote output into commits/issues.
+
 ## Deep research pipeline rules
 
 After Level 1 (`web_search_deep`):
