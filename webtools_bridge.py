@@ -208,8 +208,16 @@ def _wayback_latest(url):
     try:
         api = "https://archive.org/wayback/available?url=" + urllib.parse.quote(url, safe="")
         req = urllib.request.Request(api, headers={"User-Agent": "HermesBridge/2.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except Exception:
+                if attempt == 0:
+                    time.sleep(3)  # archive.org 429s are transient
+                    continue
+                return None
         snap = data.get("archived_snapshots", {}).get("closest")
         if snap and snap.get("status") and snap["status"][0] in ("2", "3"):
             ts = snap.get("timestamp", "")
@@ -470,15 +478,18 @@ def cmd_render(mod, args):
                 html, args.url, args.max_chars, args.wait_ms, args.render_timeout)
             if rendered:
                 text = rendered.get("text") or ""
-                result = {
-                    "url": args.url,
-                    "title": rendered.get("title") or args.url,
-                    "source": "deno-render",
-                    "chars": len(text),
-                    "text": text,
-                    "links": (rendered.get("links") or [])[:25],
-                    "images": (rendered.get("images") or [])[:12],
-                }
+                # Weak render (anti-bot shell, JS-disabled page): don't trust it —
+                # fall through to the read ladder (direct → jina → wayback).
+                if len(text) >= 300:
+                    result = {
+                        "url": args.url,
+                        "title": rendered.get("title") or args.url,
+                        "source": "deno-render",
+                        "chars": len(text),
+                        "text": text,
+                        "links": (rendered.get("links") or [])[:25],
+                        "images": (rendered.get("images") or [])[:12],
+                    }
 
     if result is None:
         # Fail-open: fall back to the plain read path (direct → jina → wayback)
