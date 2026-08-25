@@ -5,7 +5,7 @@
 # broken. It:
 #   1. syncs custom tools, web plugins and skills into ~/.hermes
 #   2. installs missing Python packages into the Hermes venv (ddgs, bs4,
-#      trafilatura, htmldate, lxml) - venv is often recreated by updates
+#      trafilatura, htmldate, lxml, curl_cffi, httpx) - venv is often recreated by updates
 #   3. py_compile-checks every synced file
 #   4. runs restore_check.py for the final verdict: are all 5 tools
 #      registered and are all deps importable? Prints OK/BROKEN.
@@ -149,6 +149,8 @@ if (Test-Path $Venv) {
         @{ Pkg = 'trafilatura';   Mod = 'trafilatura' }
         @{ Pkg = 'htmldate';      Mod = 'htmldate' }
         @{ Pkg = 'lxml';          Mod = 'lxml' }
+        @{ Pkg = 'curl_cffi';     Mod = 'curl_cffi' }
+        @{ Pkg = 'httpx';         Mod = 'httpx' }
     )
     foreach ($d in $Deps) {
         & $Venv -c "import $($d.Mod)" 2>$null
