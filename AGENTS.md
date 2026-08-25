@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-This is **not** the main Hermes application. It's a deep research pipeline for network search, plus a standalone CLI variant. Files here get restored into `~/.hermes/` via `restore.ps1`. Hermes updates regularly overwrite the live copy — this repo is the durable source of truth.
+This is **not** the main Hermes application. It's a deep research pipeline for network search, plus a standalone CLI variant, plus the DeepSeek Harness bridge (the agent's own web tooling). Files here get restored into `~/.hermes/` via `restore.ps1`. Hermes updates regularly overwrite the live copy — this repo is the durable source of truth.
 
 ## Critical workflow: edit here, apply there
 
@@ -53,10 +53,11 @@ No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone
 
 ## Architecture
 
-### Two execution modes
+### Three execution modes
 
 1. **Hermes plugin mode** — wrapper registers tools with Hermes `tools.registry`. Main entry for interactive use.
 2. **Standalone CLI** — `standalone/deep_research.py` drives the same plugin code directly via `orchestrator.py`, with a local LLM (llama.cpp) for synthesis. Reuses `plugins/web-tools/ddg/` unchanged.
+3. **DeepSeek Harness bridge** — `webtools_bridge.py` loads the Hermes wrapper with a no-op `tools.registry` stub (no Hermes framework needed) and exposes `search`/`read`/`image`/`expand`/`render` as CLI primitives. This is the agent's own web tooling; companion skill `hermes-web-tools` lives in the Harness skill store (`~/.dsh/skills/`), NOT in this repo. Uses a vendored Deno engine (`deno/`, gitignored) for inline-JS rendering.
 
 ### Wrapper → Backend pattern
 
@@ -66,6 +67,8 @@ No test runner config (no `pyproject.toml`, no `Makefile`). Tests are standalone
 - `plugins/web-tools/ddg/query_variants.py` — intent-aware query variant generator. Frequently missing after restore; backend degrades gracefully.
 - `plugins/web-tools/ddg/compose.py` — markdown formatter (compose mode).
 - `standalone/orchestrator.py` — standalone pipeline. Imports `ddg_search` + `visit_website_enhanced` directly, uses `llm_client.py` for synthesis.
+- `webtools_bridge.py` — harness bridge (repo root). Stub-registry loader + CLI subcommands + disk cache + Wayback fallback + proxy/impersonation flags + Deno `render`.
+- `js_engine/render_worker.js` — Deno happy-dom worker used by the bridge's `render` (engine binaries in gitignored `deno/`).
 
 ### Registered tools (web toolset)
 
@@ -98,6 +101,14 @@ python standalone/deep_research.py "your query" --server http://localhost:8888
 - IMDB, Wikipedia, Reddit blocked by Cloudflare/JS. JS-block detection flags these correctly.
 - `content_relevance_score` is keyword-based; can't disambiguate "Sara James" from "Sara St James" without explicit logic.
 - Platform domains (blogspot, livejournal) use path-based dedup, not base domain.
+
+### Bridge gotchas
+
+- `webtools_bridge.py` runs standalone — needs `curl_cffi`, `ddgs`, `httpx`, `bs4` in the invoking Python. It imports the wrapper with a stub `tools.registry`; if the real Hermes package is installed in the same interpreter, the stub is still installed first (idempotent).
+- Bridge stdout is ASCII-only status lines; all payload goes to the `--out` JSON file (UTF-8). Non-ASCII on stdout breaks on cp1251 consoles.
+- Cache dir is `%TEMP%\hermes_web_cache\`; `read`/`readweak` key split keeps failed reads from being cached 6 h (weak = 5 min).
+- Wayback: availability API rate-limits (429) — bridge retries once with backoff; don't hammer it in loops.
+- Deno `render` is fail-open: weak output (<300 chars) falls through to the plain read ladder. Deno binary+cache live in gitignored `deno/`; `--node-modules-dir=auto` recreates `node_modules/` (gitignored) on first call from the vendored cache.
 
 ## Deep research pipeline rules
 

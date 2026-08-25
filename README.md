@@ -25,9 +25,10 @@ The pipeline can be used as a seamlessly integrated plugin for the Hermes Agent 
 ## Architecture
 
 ### Execution Modes
-A unified backend (`plugins/web-tools/ddg/`) is driven by two modes:
+A unified backend (`plugins/web-tools/ddg/`) is driven by three modes:
 1. **Hermes Plugin Mode**: wrappers register tools into the Hermes Agent's `tools.registry`. Entry point: `hermes-agent/tools/ddg_search_tool.py`.
 2. **Standalone Mode (CLI/GUI)**: bypasses the Hermes framework; `standalone/orchestrator.py` drives the backend, `standalone/llm_client.py` talks to any OpenAI-compatible local API server.
+3. **DeepSeek Harness Bridge Mode** (v2+): exposes the same backend as plain Python CLI primitives for the DeepSeek Harness environment. See `webtools_bridge.py` (this repo) + an external skill `hermes-web-tools` (installed at `~/.dsh/skills/`). The bridge installs a no-op registry stub to load the Hermes wrapper without the full Hermes framework, then provides five subcommands (`search`, `read`, `image`, `expand`, `render`). A vendored Deno 2.7.7 engine + happy-dom (in `deno/`, gitignored) provides lightweight inline-JS execution without a headless browser.
 
 ### Deep Research Workflow
 1. **Intent Classification** — LLM assigns `query_type` (visual, technical, news, person, comparison, ...).
@@ -57,6 +58,8 @@ A unified backend (`plugins/web-tools/ddg/`) is driven by two modes:
 | `plugins/web-tools/ddg/compose.py` | Markdown answer formatting (compose mode). |
 | `standalone/orchestrator.py` | Standalone pipeline manager (crawl layer, sieve, BM25, image filter). |
 | `standalone/llm_client.py` | OpenAI-compatible local LLM client (Ollama, llama.cpp, vLLM, LMStudio). |
+| `webtools_bridge.py` | Harness bridge: registry-stub loader + `search`/`read`/`image`/`expand`/`render` CLI over the same backend. |
+| `js_engine/render_worker.js` | Deno happy-dom worker (inline-JS execution for `render`); engine binaries live in gitignored `deno/`. |
 | `restore.ps1` + `restore_check.py` | One-button deploy/health-check for Hermes plugin mode (see below). |
 
 ---
@@ -147,6 +150,39 @@ for item in out["results"]:  # results sorted by relevance
     if item.get("alive"):
         print(f"[{item['relevance']}] {item['url']} - {item['title']}")
 ```
+
+### 4. DeepSeek Harness bridge (agent's own web tooling)
+The bridge turns the same backend into plain CLI primitives for the DeepSeek Harness
+(where the built-in `web_search` needs an API key that this environment lacks).
+All output goes to a UTF-8 JSON file (unique default in `%TEMP%`); stdout carries only
+an ASCII status line (Windows cp1251-safe).
+
+```powershell
+# search / read / image / expand / render
+python webtools_bridge.py search --query "solid state battery" --max-validate 8 --out "$env:TEMP\w_search.json"
+python webtools_bridge.py read --url "https://example.com" --max-chars 8000 --out "$env:TEMP\w_read.json"
+python webtools_bridge.py image --query "red panda" --out "$env:TEMP\w_image.json"
+python webtools_bridge.py expand --query "topic" --urls "https://a.example,https://b.example" --out "$env:TEMP\w_expand.json"
+python webtools_bridge.py render --url "https://js-heavy.example" --out "$env:TEMP\w_render.json"
+```
+
+Bridge-only extras over the backend:
+- **Disk cache** — search 1 h, strong reads 6 h, weak/failed reads 5 min, image 30 min, expand 1 h. Repeat calls are ~0.5 s instead of 30-60 s.
+- **Wayback fallback** — when direct fetch is blocked/empty, reads an archive.org snapshot (`source:"wayback"`, `wayback_ts` set). Honors archive.org rate limits (429 backoff).
+- **`--proxy`** — enable NecoBox `http://127.0.0.1:2080` retry for the whole call.
+- **`--impersonate newest`** (default) — patches the backend's TLS pool to chrome136/133a/131 + safari180/184/260.
+- **`render`** — Deno 2.7.7 + happy-dom executes a page's inline JS (no headless browser); fail-open to the plain `read` ladder when rendering yields <300 chars.
+- **`--no-cache` / `--no-wayback` / `--render-timeout` / `--wait-ms`** toggles.
+
+Deno engine setup (once, ~130 MB, gitignored):
+```powershell
+$srcBin = "d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\dist\WebMediaParser\bin"
+New-Item -ItemType Directory -Force -Path deno | Out-Null
+Copy-Item "$srcBin\deno.exe" deno\deno.exe
+Copy-Item -Recurse "$srcBin\deno_cache" deno\deno_cache
+```
+The companion skill `hermes-web-tools` (in the Harness skill store, outside this repo)
+documents invocation, output schemas, and the agent-side synthesis discipline.
 
 ---
 

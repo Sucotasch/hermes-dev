@@ -4,10 +4,11 @@ This file gives Freebuff context about your project: goals, commands, convention
 
 ## What this is
 
-Hermes Deep Research Pipeline — deep web research tooling (multi-query search, URL validation, anti-bot bypass, image extraction) with two execution modes sharing the same backend:
+Hermes Deep Research Pipeline — deep web research tooling (multi-query search, URL validation, anti-bot bypass, image extraction) with three execution modes sharing the same backend:
 
 1. **Hermes plugin mode** — `hermes-agent/tools/ddg_search_tool.py` registers tools into Hermes `tools.registry` (web toolset: `web_search_deep`, `web_expand_and_fetch`, `visit_website_tool`, `image_search`, `web_deep_research`, `web_extract`, `web_search`).
 2. **Standalone CLI/GUI** — `standalone/deep_research.py` + `standalone/gui.py` (PyQt5), driven by `standalone/orchestrator.py` with a local OpenAI-compatible LLM (llama.cpp/Ollama) for synthesis.
+3. **DeepSeek Harness bridge** (v2+) — `webtools_bridge.py` loads the Hermes wrapper with a no-op registry stub and exposes `search`/`read`/`image`/`expand`/`render` as plain Python CLI primitives. Used by the Harness skill `hermes-web-tools` (at `~/.dsh/skills/`). Vendored Deno 2.7.7 + happy-dom in `deno/` provides inline-JS execution without a headless browser.
 
 This repo is the **durable source of truth**: files are restored into the live Hermes install at `~/.hermes/` via `restore.ps1` because Hermes updates overwrite the live copies.
 
@@ -27,6 +28,8 @@ This repo is the **durable source of truth**: files are restored into the live H
 | `plugins/web-tools/ddg/compose.py` | Markdown formatter (compose mode) |
 | `standalone/orchestrator.py` | Standalone pipeline (reuses `plugins/web-tools/ddg/` unchanged) |
 | `standalone/deep_research.py`, `standalone/gui.py`, `standalone/llm_client.py` | CLI / PyQt5 GUI / LLM client |
+| `webtools_bridge.py` | Harness bridge: registry-stub loader, 5 subcommands, disk cache, Wayback fallback, proxy/impersonation flags |
+| `js_engine/render_worker.js` | Deno happy-dom worker (inline-JS execution); engine binaries in gitignored `deno/` |
 | `skills/web-deep-search/SKILL.md`, `skills/restore-context/SKILL.md` | Skills copied into `~/.hermes` |
 | `restore.ps1` | PowerShell restore script (7 files + backup + compose smoke probe) |
 | `CONTEXT.md` / `PROJECT_CONTEXT.md` / `README.md` | Durable session context, detailed docs (read for depth) |

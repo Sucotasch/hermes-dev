@@ -4,11 +4,15 @@ __pycache__/
 .plans/
 .qa/
 .mimocode/
+.agents/
 Crash.txt
 test_report*.md
 reports/
 standalone/logs/
 Temp/
+.pytest_cache/
+*.log
+*.json.tmp
 
 # Deno JS engine (vendored binary ~127 MB + npm cache ~4781 files)
 # Copy from web-media-parser dist/WebMediaParser/bin/ to deno/ :
