@@ -265,6 +265,38 @@ def cmd_search(mod, args):
     return result
 
 
+# Anti-bot challenge markers. A page whose *text* contains any of these is a
+# challenge/interstitial shell, not real content — even if it is long (the
+# challenge HTML/CSS alone can exceed the weak-read threshold).
+_CHALLENGE_MARKERS = (
+    "just a moment",            # Cloudflare classic interstitial
+    "challenge-platform",       # Cloudflare JS challenge
+    "cf-chl-", "cf_chl_",       # Cloudflare challenge IDs (html/url/body)
+    "cf-clearance",             # Cloudflare clearance cookie name
+    "enable javascript",        # generic JS-required gate
+    "verify that you're not a robot",
+    "you're not a robot",       # AWS WAF / JS-required wording
+    "awswaf", "token.awswaf",   # AWS WAF challenge
+    "challenge.js",             # AWS WAF challenge script name
+    "turnstile",                # Cloudflare Turnstile
+    "recaptcha",                # Google reCAPTCHA page
+    "checking your browser",    # DDoS-Guard / generic
+    "attention required",       # Cloudflare 403 wording
+    "we need to verify that you're not a robot",
+)
+
+
+def _is_challenge_text(text):
+    """True when the extracted text looks like an anti-bot interstitial shell."""
+    if not text:
+        return False
+    low = text.lower()
+    for marker in _CHALLENGE_MARKERS:
+        if marker in low:
+            return True
+    return False
+
+
 def cmd_read(mod, args):
     cache_key = f"read:{args.url}:{args.max_chars}"
     if not args.no_cache:
@@ -279,9 +311,9 @@ def cmd_read(mod, args):
     body = page.get("text") or page.get("content") or ""
     chars = len(body)
 
-    # Step 2: Wayback fallback when direct failed or returned weak content
-    # (JS-heavy pages often return a 200-300-char shell — archive copy is better).
-    if not args.no_wayback and (source == "failed" or chars < 500):
+    # Step 2: Wayback fallback when direct failed, returned weak content,
+    # or returned an anti-bot challenge shell.
+    if not args.no_wayback and (source == "failed" or chars < 500 or _is_challenge_text(body)):
         wb = _wayback_latest(args.url)
         if wb:
             wb_url, wb_ts, snap_url = wb
@@ -305,15 +337,19 @@ def cmd_read(mod, args):
         "links": [{"url": l.get("url"), "text": l.get("text")} for l in (page.get("links") or [])[:25]],
         "images": (page.get("fullsize_images") or [])[:12],
     }
+    if source != "wayback" and _is_challenge_text(body):
+        # The direct read only produced an anti-bot interstitial (Cloudflare/
+        # AWS WAF/etc.) and the wayback fallback couldn't recover real content.
+        result["challenge"] = True
     if source == "wayback":
         result["wayback_ts"] = wb_ts
         result["wayback_snapshot"] = snap_url
 
     if not args.no_cache:
-        # Strong results cache long; weak/failed reads cache briefly so a later
+        # Strong results cache long; weak/failed/challenge caches briefly so a later
         # call retries (and can hit the wayback fallback) instead of serving a
         # stale anti-bot shell.
-        if source == "failed" or chars < 500:
+        if source == "failed" or chars < 500 or _is_challenge_text(body):
             _cache_put("readweak", cache_key, result)
         else:
             _cache_put("read", cache_key, result)
@@ -486,7 +522,7 @@ def cmd_render(mod, args):
                 text = rendered.get("text") or ""
                 # Weak render (anti-bot shell, JS-disabled page): don't trust it —
                 # fall through to the read ladder (direct → jina → wayback).
-                if len(text) >= 300:
+                if len(text) >= 300 and not _is_challenge_text(text):
                     result = {
                         "url": args.url,
                         "title": rendered.get("title") or args.url,
