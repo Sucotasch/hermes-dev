@@ -9,3 +9,12 @@ test_report*.md
 reports/
 standalone/logs/
 Temp/
+
+# Deno JS engine (vendored binary ~127 MB + npm cache ~4781 files)
+# Copy from web-media-parser dist/WebMediaParser/bin/ to deno/ :
+#   Copy-Item "$srcBin\deno.exe" "deno\deno.exe"
+#   Copy-Item -Recurse "$srcBin\deno_cache" "deno\deno_cache"
+deno/
+
+# Deno --node-modules-dir=auto artifact (recreated from vendored cache on first render call)
+node_modules/

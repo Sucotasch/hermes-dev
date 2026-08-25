@@ -63,15 +63,17 @@ LEGACY_IMPERSONATE = ["chrome110", "chrome116", "chrome120", "chrome124"]
 
 # ── Deno JS render engine ──────────────────────────────────────────────────
 # Deno 2.7.7 + happy-dom 15.11.7 — lightweight JS execution without headless
-# browser. The bundled binary and vendored npm cache come from the web-media-
-# parser project (dist/WebMediaParser/bin/). Resolution order:
+# browser. The engine is vendored INTO this repo (deno/deno.exe + deno/deno_cache)
+# so no external project paths are needed. Resolution order:
 #   1. WEB_MEDIA_PARSER_DENO / DENO_BIN env
-#   2. web-media-parser dist bundled bin/deno.exe
-#   3. web-media-parser release bundled bin/deno.exe
+#   2. this repo's deno/deno.exe (vendored)
+#   3. web-media-parser dist bundled bin/deno.exe (fallback)
 #   4. deno on PATH
 #   5. deno Python package (deno.find_deno_bin)
-RENDER_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "js_engine", "render_worker.js")
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+RENDER_WORKER = os.path.join(_REPO_ROOT, "js_engine", "render_worker.js")
+_DENO_LOCAL = os.path.join(_REPO_ROOT, "deno", "deno.exe")
+_DENO_CACHE_LOCAL = os.path.join(_REPO_ROOT, "deno", "deno_cache")
 _DENO_WMP_DIST = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\dist\WebMediaParser\bin\deno.exe"
 _DENO_WMP_RELEASE = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\release\WebMediaParser\bin\deno.exe"
 _DENO_CACHE = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\dist\WebMediaParser\bin\deno_cache"
@@ -83,6 +85,8 @@ def _find_deno_bin():
     env = os.environ.get("WEB_MEDIA_PARSER_DENO") or os.environ.get("DENO_BIN")
     if env and os.path.exists(env):
         return env
+    if os.path.exists(_DENO_LOCAL):
+        return _DENO_LOCAL
     for cand in (_DENO_WMP_DIST, _DENO_WMP_RELEASE):
         if os.path.exists(cand):
             return cand
@@ -98,9 +102,11 @@ def _find_deno_bin():
 
 def _find_deno_cache():
     """Vendored npm cache with happy-dom; must exist for offline render."""
+    if os.path.isdir(_DENO_CACHE_LOCAL):
+        return _DENO_CACHE_LOCAL
     if os.path.isdir(_DENO_CACHE):
         return _DENO_CACHE
-    # fallback: src cache (dev mode)
+    # fallback: src cache (dev mode of web-media-parser)
     c2 = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\src\parser\js_engine\deno_cache"
     if os.path.isdir(c2):
         return c2
