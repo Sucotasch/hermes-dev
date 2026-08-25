@@ -25,7 +25,7 @@ All real output goes to a UTF-8 JSON file (default in the system TEMP directory,
 override with --out); only an ASCII status line is printed to stdout (avoids
 Windows cp1251 crashes).
 """
-import sys, importlib.util, json, types, argparse, traceback, os, tempfile, time, hashlib, urllib.parse, urllib.request, random
+import sys, importlib.util, json, types, argparse, traceback, os, tempfile, time, hashlib, urllib.parse, urllib.request, random, subprocess, threading, shutil
 from pathlib import Path
 
 # ── Silences curl_cffi stderr warning ──────────────────────────────────────
@@ -60,6 +60,55 @@ NEW_IMPERSONATE = [
     "safari180", "safari184", "safari260",
 ]
 LEGACY_IMPERSONATE = ["chrome110", "chrome116", "chrome120", "chrome124"]
+
+# ── Deno JS render engine ──────────────────────────────────────────────────
+# Deno 2.7.7 + happy-dom 15.11.7 — lightweight JS execution without headless
+# browser. The bundled binary and vendored npm cache come from the web-media-
+# parser project (dist/WebMediaParser/bin/). Resolution order:
+#   1. WEB_MEDIA_PARSER_DENO / DENO_BIN env
+#   2. web-media-parser dist bundled bin/deno.exe
+#   3. web-media-parser release bundled bin/deno.exe
+#   4. deno on PATH
+#   5. deno Python package (deno.find_deno_bin)
+RENDER_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "js_engine", "render_worker.js")
+_DENO_WMP_DIST = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\dist\WebMediaParser\bin\deno.exe"
+_DENO_WMP_RELEASE = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\release\WebMediaParser\bin\deno.exe"
+_DENO_CACHE = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\dist\WebMediaParser\bin\deno_cache"
+RENDER_TIMEOUT = 8.0  # seconds; worker killed on timeout
+RENDER_WAIT_MS = 500   # ms grace period for script microtasks
+
+
+def _find_deno_bin():
+    env = os.environ.get("WEB_MEDIA_PARSER_DENO") or os.environ.get("DENO_BIN")
+    if env and os.path.exists(env):
+        return env
+    for cand in (_DENO_WMP_DIST, _DENO_WMP_RELEASE):
+        if os.path.exists(cand):
+            return cand
+    path = shutil.which("deno") or shutil.which("deno.exe")
+    if path:
+        return path
+    try:
+        import deno  # type: ignore
+        return deno.find_deno_bin()
+    except Exception:
+        return None
+
+
+def _find_deno_cache():
+    """Vendored npm cache with happy-dom; must exist for offline render."""
+    if os.path.isdir(_DENO_CACHE):
+        return _DENO_CACHE
+    # fallback: src cache (dev mode)
+    c2 = r"d:\Arx\Software Downloads\_Images_EDIT-pack\web-media-parser\src\parser\js_engine\deno_cache"
+    if os.path.isdir(c2):
+        return c2
+    return None
+
+
+def _render_available():
+    return bool(_find_deno_bin()) and os.path.isfile(RENDER_WORKER) and bool(_find_deno_cache())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -310,12 +359,146 @@ def cmd_expand(mod, args):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Deno JS render (happy-dom)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_raw_html(url):
+    """Fetch raw HTML via the Hermes plugin fetcher chain (no text extraction).
+
+    Returns (html, source) where source is the fetch method label or None.
+    """
+    m = sys.modules.get("plugins.web_tools.ddg.visit_website_enhanced")
+    if m is None or not hasattr(m, "_fetch"):
+        return None, None
+    try:
+        html = m._fetch(url)
+        if html:
+            return html, "direct"
+    except Exception:
+        pass
+    return None, None
+
+
+def _deno_render_call(html, page_url, max_chars, wait_ms, timeout):
+    """One-shot Deno render: spawn worker, send HTML, read response line.
+
+    Returns the result dict or None (fail-open: no binary, worker crash,
+    timeout, JS exception).
+    """
+    deno = _find_deno_bin()
+    cache = _find_deno_cache()
+    if not deno or not cache:
+        return None
+    env = os.environ.copy()
+    env["DENO_DIR"] = cache
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(
+            [deno, "run", "--quiet", "--node-modules-dir=auto", RENDER_WORKER],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env=env, **kwargs,
+        )
+    except Exception:
+        return None
+    try:
+        request = json.dumps({
+            "id": 0, "html": html, "pageUrl": page_url,
+            "maxChars": max_chars, "waitMs": wait_ms,
+        })
+        try:
+            proc.stdin.write(request + "\n")
+            proc.stdin.flush()
+        except Exception:
+            return None
+        # Read one line with a hard timeout (kills the worker on hang).
+        holder = [None]
+        def _reader():
+            try:
+                holder[0] = proc.stdout.readline()
+            except Exception:
+                holder[0] = None
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return None  # stuck — killed below
+        line = holder[0]
+        if not line:
+            return None
+        resp = json.loads(line.strip())
+        if resp.get("error") or not isinstance(resp.get("result"), dict):
+            return None
+        return resp["result"]
+    except Exception:
+        return None
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def cmd_render(mod, args):
+    """Fetch a page and execute its inline JS via Deno happy-dom, then extract
+    the post-render text/links/images. Fail-open to the plain read path when
+    Deno is unavailable or rendering fails."""
+    cache_key = f"render:{args.url}:{args.max_chars}"
+    if not args.no_cache:
+        cached = (_cache_get("render", cache_key, READ_TTL)
+                  or _cache_get("read", cache_key, READ_TTL)
+                  or _cache_get("readweak", cache_key, READ_WEAK_TTL))
+        if cached is not None:
+            return cached
+
+    result = None
+    if _render_available():
+        html, _src = _fetch_raw_html(args.url)
+        if html:
+            rendered = _deno_render_call(
+                html, args.url, args.max_chars, args.wait_ms, args.render_timeout)
+            if rendered:
+                text = rendered.get("text") or ""
+                result = {
+                    "url": args.url,
+                    "title": rendered.get("title") or args.url,
+                    "source": "deno-render",
+                    "chars": len(text),
+                    "text": text,
+                    "links": (rendered.get("links") or [])[:25],
+                    "images": (rendered.get("images") or [])[:12],
+                }
+
+    if result is None:
+        # Fail-open: fall back to the plain read path (direct → jina → wayback)
+        return cmd_read(mod, args)
+
+    if not args.no_cache:
+        if result.get("chars", 0) < 500:
+            _cache_put("readweak", cache_key, result)
+        else:
+            _cache_put("render", cache_key, result)
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  argparse
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_parser():
     ap = argparse.ArgumentParser(description="Hermes Web Tools Bridge v2")
-    ap.add_argument("cmd", choices=["search", "read", "image", "expand"],
+    ap.add_argument("cmd", choices=["search", "read", "image", "expand", "render"],
                     help="Subcommand")
     # shared
     ap.add_argument("--out", default="",
@@ -331,10 +514,15 @@ def _build_parser():
     # search
     ap.add_argument("--query", default="", help="Search query")
     ap.add_argument("--max-validate", type=int, default=8, help="Max URLs to validate")
-    # read
+    # read / render
     ap.add_argument("--url", default="", help="URL to fetch")
     ap.add_argument("--max-chars", type=int, default=8000, help="Max text chars")
     ap.add_argument("--no-wayback", action="store_true", help="Skip Wayback fallback")
+    # render (Deno)
+    ap.add_argument("--render-timeout", type=float, default=RENDER_TIMEOUT,
+                    help="Deno render worker timeout in seconds (default 8.0)")
+    ap.add_argument("--wait-ms", type=int, default=RENDER_WAIT_MS,
+                    help="Grace period in ms for page scripts (default 500)")
     # expand
     ap.add_argument("--urls", default="", help="Comma-separated source URLs (for expand)")
     ap.add_argument("--max-new-links", type=int, default=10, help="Max new links to fetch")
@@ -376,6 +564,8 @@ def main():
             result = cmd_image(mod, args)
         elif args.cmd == "expand":
             result = cmd_expand(mod, args)
+        elif args.cmd == "render":
+            result = cmd_render(mod, args)
     except Exception as e:
         result["error"] = repr(e)
         result["trace"] = traceback.format_exc()
