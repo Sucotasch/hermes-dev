@@ -1,6 +1,9 @@
 # DSH reasoning_content 400 Bug — refined diagnosis & final fix (settings.yaml)
 
-Status: **FIXED via user-config (settings.yaml), verified in a live session on 2026-08-26**.
+Status: **FIXED via user-config (settings.yaml), verified across a LONG
+context-heavy session on 2026-08-26** — dozens of tool calls, thousands of
+lines of docs/code read, zero 400s (exactly the workload that used to trigger
+the bug).
 Recorded: 2026-08-24 (initial diagnosis), 2026-08-26 (refined diagnosis + config fix + live verification).
 
 ## Symptom
@@ -111,10 +114,35 @@ provider edits against the schema, not by eye.
 - After restart with the fix: reasoning-effort selector appeared for
   bai/deepseek-v4-flash (model.reasoning became true).
 - No `developer`-role 400 (supportsDeveloperRole: false held).
-- No reasoning_content 400 across turns.
+- **Long-session stress test passed**: a context-heavy working session (deep
+  study of a large codebase — many assistant tool-call messages, thousands of
+  lines read) produced ZERO reasoning_content 400s. This workload is exactly
+  what used to trigger the bug before the fix.
 - Occasional "retried model request 2/5" is dsh-llm-retry on transient
   network/load (5xx, timeouts) — pre-existing, unrelated to this bug.
 - Backup of the pre-fix file: `~/.dsh/settings.yaml.pre-fix-20260826`.
+
+## Configuration to apply (active fix)
+
+`~/.dsh/settings.yaml`, provider `bai`, model `deepseek-v4-flash`:
+
+```yaml
+- id: deepseek-v4-flash
+  reasoningEfforts:
+    off: null
+    low: "low"
+    medium: "medium"
+    high: "high"
+  compat:
+    requiresReasoningContentOnAssistantMessages: true
+    supportsDeveloperRole: false
+```
+
+> **Note**: a first attempt WITHOUT `supportsDeveloperRole: false` broke every
+> request with `unknown variant 'developer'` (pi-ai sends the system prompt
+> with role `developer` whenever `model.reasoning && compat.supportsDeveloperRole`,
+> and b.ai does not accept that role). The complete block above — with
+> `supportsDeveloperRole: false` — is the working fix.
 
 ## Upstream issues worth opening (pi-ai / DSH)
 
