@@ -1,0 +1,25 @@
+--- a/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js
++++ b/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js
+@@ -848,7 +848,15 @@
+             const assistantText = assistantTextParts.map((part) => part.text).join("");
++            // Keep thinking blocks that carry a thinkingSignature (e.g. DeepSeek's
++            // "reasoning_content") even when text is whitespace-only: DeepSeek's
++            // thinking-mode API requires every prior assistant reasoning_content to
++            // be passed back verbatim; trimming whitespace-only blocks drops the
++            // field entirely (or injects ""), producing HTTP 400 "reasoning_content
++            // in the thinking mode must be passed back to the API".
+             const nonEmptyThinkingBlocks = msg.content
+                 .filter(isThinkingContentBlock)
+-                .filter((block) => block.thinking.trim().length > 0);
++                .filter((block) => block.thinking.trim().length > 0 || block.thinkingSignature);
+             if (nonEmptyThinkingBlocks.length > 0) {
+                 if (compat.requiresThinkingAsText) {
+                     // Convert thinking blocks to plain text (no tags to avoid model mimicking them)
+
+--- How to apply (after a DSH auto-update reverts the fix):
+---   cd "D:\Works\DSH Desktop\resources\app.asar.unpacked"
+---   git apply <this file>   (or: patch -p1 < this file)
+---   Then restart DSH Desktop.
+---
+--- Target: pi-ai v0.82.1 (check node_modules/@earendil-works/pi-ai/package.json).
+--- If a newer pi-ai ships, verify the same filter at the equivalent line.
