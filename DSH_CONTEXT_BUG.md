@@ -1,7 +1,7 @@
-# DSH reasoning_content 400 Bug — refined diagnosis & fix
+# DSH reasoning_content 400 Bug — refined diagnosis & final fix (settings.yaml)
 
-Status: **FIXED by patching pi-ai v0.82.1 in the installed DSH runtime**.
-Recorded: 2026-08-24 (initial diagnosis), 2026-08-26 (refined diagnosis + fix applied).
+Status: **FIXED via user-config (settings.yaml), verified in a live session on 2026-08-26**.
+Recorded: 2026-08-24 (initial diagnosis), 2026-08-26 (refined diagnosis + config fix + live verification).
 
 ## Symptom
 
@@ -16,7 +16,7 @@ The whole turn is lost (files on disk survive). The error appears when an
 assistant message that originally had reasoning_content (even whitespace-only)
 is replayed in a subsequent request without the field.
 
-## Root cause (refined, from real session data + pi-ai code)
+## Root cause (from real session data + pi-ai code)
 
 **Primary trigger**: The model produces `reasoning_content: " "` (single space)
 on tool-call-only turns — stored in the durable session as
@@ -26,88 +26,106 @@ entirely, so `assistantMsg.reasoning_content` is never set on the outbound
 message. DeepSeek's API (behind any proxy) requires the field to be passed back
 verbatim → 400.
 
-**Mechanism** (in `openai-completions.js` lines 848-856, pi-ai v0.82.1):
-
-```js
-// nonEmptyThinkingBlocks filter drops whitespace-only reasoning blocks:
-const nonEmptyThinkingBlocks = msg.content
-    .filter(isThinkingContentBlock)
-    .filter((block) => block.thinking.trim().length > 0);
-```
-
-For tool-call assistant messages, the model emits `" "` as reasoning_content.
-The `" ".trim().length > 0` check is false → block dropped. Then:
-- If `isDeepSeek` = true (direct deepseek provider): the fallback at line 924-928
-  sets `reasoning_content = ""` (empty string) — but DeepSeek rejects empty too.
-- If `isDeepSeek` = false (proxy like bai, tokenrouter): the fallback never fires
-  → `reasoning_content` is **entirely absent** from the request → 400.
+**Second trigger (found 2026-08-26)**: *Every* assistant message without a
+reasoning block (tool-call-only messages that produced no reasoning at all) also
+lacks `reasoning_content` on replay. pi-ai only patches the field to `""` when
+`compat.requiresReasoningContentOnAssistantMessages && model.reasoning` (see
+`openai-completions.js` fallback). That compat flag defaults to `isDeepSeek`
+(`provider === "deepseek" || baseUrl.includes("deepseek.com")`), which is
+**false for proxies** (bai, tokenrouter, openrouter, etc.), and `model.reasoning`
+is also false for a proxy route whose model isn't in pi-ai's catalog. Result:
+the field is **entirely absent** from the request → 400.
 
 **Compaction is NOT the cause**: session data shows 16 whitespace-only reasoning
-blocks (length 1, single space `" "`) and 0 truly-empty blocks. The bug is
-purely in pi-ai's serialization filter, not in compaction.
+blocks (length 1, single space `" "`) and 0 truly-empty blocks; all replayable
+assistant messages carry a valid `replayState`. The loss happens purely in
+pi-ai's serialization, not in compaction or replay state.
 
 **Configurations affected**: any route using DeepSeek reasoning models through
 the `@earendil-works/pi-ai` `openai-completions` adapter — including proxies
 (bai, tokenrouter, openrouter) that forward to DeepSeek's API. The `isDeepSeek`
-detection (`provider === "deepseek" || baseUrl.includes("deepseek.com")`) fails
-for proxies, so `requiresReasoningContentOnAssistantMessages` is false and the
-field is absent rather than empty.
+detection fails for proxies, so `requiresReasoningContentOnAssistantMessages` is
+false and the field is absent rather than empty.
 
-## Fix applied (2026-08-26)
+## Why the pi-ai patch attempt was abandoned (2026-08-26)
 
-**File**: `D:\Works\DSH Desktop\resources\app.asar.unpacked\node_modules\@earendil-works\pi-ai\dist\api\openai-completions.js`
-(line 848-856)
-
-**Change**: Keep thinking blocks that carry a `thinkingSignature` (e.g. DeepSeek's
-`"reasoning_content"`) even when their text is whitespace-only:
+An earlier fix patched `@earendil-works/pi-ai/dist/api/openai-completions.js`
+filter to keep whitespace-only thinking blocks that carry a `thinkingSignature`:
 
 ```js
-// Before (buggy):
-.filter((block) => block.thinking.trim().length > 0);
-
-// After (fixed):
 .filter((block) => block.thinking.trim().length > 0 || block.thinkingSignature);
 ```
 
-This ensures the whitespace-only reasoning block is included in
-`nonEmptyThinkingBlocks`, so the existing code at line 875-881 sets
-`assistantMsg.reasoning_content = " "` (the verbatim original whitespace
-text) — satisfying DeepSeek's "pass reasoning_content back" rule.
+This was loaded and working in the runtime, but the **400 still recurred** — it
+only covered the whitespace case, not the tool-call-only-without-reasoning case
+(the fallback never fired because `model.reasoning` was false for bai). Also,
+DSH's self-update (2026-08-26) moved pi-ai **inside `app.asar`** (no longer in
+`app.asar.unpacked`), so patching the unpacked file stopped being possible and
+any asar patch would be wiped by the next update anyway. The patch file was
+retired to `~/.dsh/backups-20260826/patches/`.
 
-**Why this works**: The `thinkingSignature` ("reasoning_content") is the signal
-that the block came from a DeepSeek-style reasoning field that must be
-round-tripped. Blocks without a signature (e.g. plain llama.cpp thinking) are
-still filtered out when whitespace-only — no behavior change for other providers.
+## Final fix: settings.yaml (user config, survives updates)
 
-**Backup created**: `openai-completions.js.bak-2026-08-26` (same directory).
+**File**: `~/.dsh/settings.yaml` — provider `bai`, model `deepseek-v4-flash`:
 
-## Requires restart
+```yaml
+- id: deepseek-v4-flash
+  reasoningEfforts:
+    off: null
+    low: "low"
+    medium: "medium"
+    high: "high"
+  compat:
+    requiresReasoningContentOnAssistantMessages: true
+    supportsDeveloperRole: false
+```
 
-DSH caches the patched module in memory. The fix takes effect next time the
-DSH Desktop app is restarted. Node module resolution is from
-`app.asar.unpacked\node_modules\@earendil-works\pi-ai` — the only copy.
+**Why this works**:
+- `reasoningEfforts` → `model.reasoning = true` → pi-ai's fallback
+  `assistantMsg.reasoning_content = ""` now fires for every assistant message
+  that has no reasoning_content (whitespace blocks dropped by the filter AND
+  tool-call-only messages without reasoning). DeepSeek accepts `""` as "passed
+  back". Also enables the reasoning-effort selector in the DSH UI.
+- `off: null` → `model.thinkingLevelMap.off === null` → pi-ai does **not** send
+  `reasoning_effort: "none"` when no effort is chosen → the model keeps its
+  server-side default thinking. No wire change when the user leaves the level
+  unset.
+- `requiresReasoningContentOnAssistantMessages: true` → forces the fallback on
+  (it is normally gated on `isDeepSeek`, which is false for bai).
+- `supportsDeveloperRole: false` → **critical**: with `model.reasoning = true`,
+  pi-ai would otherwise send the system prompt with role `developer`
+  (`useDeveloperRole = model.reasoning && compat.supportsDeveloperRole`), and
+  b.ai rejects that role (`unknown variant 'developer'` → 400). Setting it
+  false keeps role `system`. This was the missing piece that broke the first
+  attempt (2026-08-26, reverted).
 
-## Risks
+**Schema rule learned the hard way**: in `dsh-llm-pi-ai`'s strict Zod schema,
+`reasoningEfforts` wire values must be strings for every level **except** `off`,
+which is the only one allowed to be `null` (`only "off" may leave it empty`).
+Writing `low: null` fails validation of the whole `llm-pi-ai` plugin → all
+custom providers disappear and the "add custom provider" UI breaks. Validate
+provider edits against the schema, not by eye.
 
-- **DSH auto-update** may overwrite the patched file. The fix is in pi-ai
-  v0.82.1's `dist/` (compiled output); an update that replaces the node_modules
-  tree will revert it. Re-apply after updates.
-- **The fix lives in the installed DSH runtime**, not in the Hermes repo.
-  Documented here as `openai-completions.js.patch`.
-- **No regression for other providers**: the extra `|| block.thinkingSignature`
-  condition only fires for blocks with a signature AND whitespace-only text.
-  Normal reasoning blocks (non-whitespace) are unaffected. Blocks without a
-  signature are still dropped when whitespace-only (same as before).
+## Verification (live session, 2026-08-26)
 
-## Verification (session data, 2026-08-26)
+- After restart with the fix: reasoning-effort selector appeared for
+  bai/deepseek-v4-flash (model.reasoning became true).
+- No `developer`-role 400 (supportsDeveloperRole: false held).
+- No reasoning_content 400 across turns.
+- Occasional "retried model request 2/5" is dsh-llm-retry on transient
+  network/load (5xx, timeouts) — pre-existing, unrelated to this bug.
+- Backup of the pre-fix file: `~/.dsh/settings.yaml.pre-fix-20260826`.
 
-- Decompressed current session: 7,184,345 bytes, 671 reasoning blocks
-- 16 whitespace-only reasoning blocks (length 1, single space `" "`)
-- 0 truly-empty reasoning blocks
-- The 400 error at turn 2, step 44 was preceded by whitespace-only reasoning
-  blocks in the message history
-- Session 06b51b9f (14 turns, completed cleanly) had no whitespace-only
-  reasoning → no trigger
+## Upstream issues worth opening (pi-ai / DSH)
+
+Both are real pi-ai bugs affecting any proxy user, not just bai:
+1. `supportsDeveloperRole` defaults to `true` for any unknown
+   OpenAI-compatible provider, but many proxies don't accept the `developer`
+   role. Detection should be conservative (opt-in), not opt-out.
+2. `isDeepSeek` detection (`provider === "deepseek" ||
+   baseUrl.includes("deepseek.com")`) misses DeepSeek models served through
+   proxies (`model.id` contains "deepseek", baseUrl doesn't). Reasoning pass-back
+   requirement should key off the model id, not the endpoint.
 
 ## References
 
@@ -118,6 +136,7 @@ DSH Desktop app is restarted. Node module resolution is from
 
 ## Files touched in this repo (all pushed)
 
+- `DSH_CONTEXT_BUG.md` — this document.
 - `webtools_bridge.py` — anti-bot challenge detection (`_is_challenge_text`,
   `challenge: true` in read output), wayback fallback on interstitials.
 - `js_engine/render_worker.js` — Deno happy-dom render worker (v3).
