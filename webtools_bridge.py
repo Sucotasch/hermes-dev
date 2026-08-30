@@ -20,6 +20,14 @@ Subcommands:
   read    --url "..." [--max-chars N] [--no-cache] [--no-wayback] [--proxy] -> page
   image   --query "..." [--no-cache] -> image search results
   expand  --query "..." --urls "u1,u2,..." [--max-new-links N] [--proxy] -> Level-2
+  render  --url "..." [...] -> Deno happy-dom JS render (fail-open to read)
+  probe   --url "..." --claim "text" [...] -> MATCH/NO-MATCH + up to 3 excerpts
+
+Result fields:
+  - read/render: `challenge: true` + `blocked: cloudflare|aws_waf|recaptcha|login|generic`
+    when the page is an anti-bot/login wall (stable codes to branch on).
+  - search: `handle: S<n>` per result; read: `handle: L<n>` per link (reference
+    handles — cheap to cite in agent turns).
 
 All real output goes to a UTF-8 JSON file (default in the system TEMP directory,
 override with --out); only an ASCII status line is printed to stdout (avoids
@@ -249,8 +257,9 @@ def cmd_search(mod, args):
     out = mod._safe_search_deep(args.query, validate=True, max_validate=args.max_validate)
     results = out.get("results", [])
     top = []
-    for r in results[:args.max_validate]:
+    for i, r in enumerate(results[:args.max_validate], start=1):
         top.append({
+            "handle": f"S{i}",
             "url": r.get("url"),
             "title": r.get("title"),
             "alive": r.get("alive"),
@@ -285,16 +294,53 @@ _CHALLENGE_MARKERS = (
     "we need to verify that you're not a robot",
 )
 
+# Vendor classification for `blocked` result flags — stable codes agents can
+# branch on (ported from DonSeTch's "stable error codes" idea):
+#   blocked: "cloudflare" | "aws_waf" | "recaptcha" | "login" | "generic"
+_CHALLENGE_VENDORS = (
+    # (marker, vendor) — order matters: most specific first
+    ("awswaf", "aws_waf"), ("token.awswaf", "aws_waf"), ("challenge.js", "aws_waf"),
+    ("cf-clearance", "cloudflare"), ("cf-chl-", "cloudflare"), ("cf_chl_", "cloudflare"),
+    ("challenge-platform", "cloudflare"), ("turnstile", "cloudflare"),
+    ("attention required", "cloudflare"), ("just a moment", "cloudflare"),
+    ("recaptcha", "recaptcha"),
+)
+_LOGIN_MARKERS = ("log in", "sign in", "login required", "please log in",
+                  "sign in to continue", "log in to continue", "you must be logged in")
+
 
 def _is_challenge_text(text):
     """True when the extracted text looks like an anti-bot interstitial shell."""
+    return _challenge_kind(text) is not None
+
+
+def _challenge_kind(text):
+    """Classify an anti-bot interstitial by vendor.
+
+    Returns one of "cloudflare", "aws_waf", "recaptcha", "generic" or None.
+    Detects the vendor even when the shell text is long (challenge HTML/CSS
+    alone can exceed weak-read thresholds), so agents get an honest
+    ``blocked`` code instead of a page full of challenge CSS.
+    """
     if not text:
-        return False
+        return None
     low = text.lower()
+    for marker, vendor in _CHALLENGE_VENDORS:
+        if marker in low:
+            return vendor
     for marker in _CHALLENGE_MARKERS:
         if marker in low:
-            return True
-    return False
+            return "generic"
+    return None
+
+
+def _is_login_gate(text):
+    """True when the page is a login wall (not an anti-bot challenge)."""
+    if not text or len(text) < 60:
+        return False
+    low = text.lower()
+    hits = sum(1 for m in _LOGIN_MARKERS if m in low)
+    return hits >= 2
 
 
 def cmd_read(mod, args):
@@ -334,13 +380,17 @@ def cmd_read(mod, args):
         "source": source,
         "chars": chars,
         "text": body,
-        "links": [{"url": l.get("url"), "text": l.get("text")} for l in (page.get("links") or [])[:25]],
+        "links": [{"handle": f"L{i}", "url": l.get("url"), "text": l.get("text")}
+                  for i, l in enumerate((page.get("links") or [])[:25], start=1)],
         "images": (page.get("fullsize_images") or [])[:12],
     }
     if source != "wayback" and _is_challenge_text(body):
         # The direct read only produced an anti-bot interstitial (Cloudflare/
         # AWS WAF/etc.) and the wayback fallback couldn't recover real content.
         result["challenge"] = True
+        result["blocked"] = _challenge_kind(body) or "generic"
+    elif source != "wayback" and _is_login_gate(body):
+        result["blocked"] = "login"
     if source == "wayback":
         result["wayback_ts"] = wb_ts
         result["wayback_snapshot"] = snap_url
@@ -546,12 +596,94 @@ def cmd_render(mod, args):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Probe mode (token-cheap claim verification)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _normalize_probe(text):
+    """Collapse whitespace + lowercase for robust claim matching."""
+    return " ".join(text.split()).lower()
+
+
+def _extract_excerpts(text, claim, max_excerpts=3, radius=220):
+    """Return up to ``max_excerpts`` short windows around claim hits."""
+    low = _normalize_probe(text)
+    claim_n = _normalize_probe(claim)
+    if not claim_n:
+        return []
+    excerpts = []
+    start = 0
+    while len(excerpts) < max_excerpts:
+        idx = low.find(claim_n, start)
+        if idx == -1:
+            break
+        lo = max(0, idx - radius // 2)
+        hi = min(len(text), idx + len(claim_n) + radius // 2)
+        excerpts.append(text[lo:hi].strip())
+        start = idx + len(claim_n)
+    return excerpts
+
+
+def cmd_probe(mod, args):
+    """Verify a claim against a URL — MATCH/NO-MATCH + up to 3 excerpts.
+
+    Token-cheap alternative to a full read: returns ~60 tokens of evidence
+    instead of the whole page (ported from DonSeTch's `must_contain` idea).
+    """
+    if not args.url or not args.claim:
+        return {"error": "probe requires --url and --claim", "match": None}
+
+    cache_key = f"probe:{args.url}:{_normalize_probe(args.claim)}"
+    if not args.no_cache:
+        cached = _cache_get("probe", cache_key, READ_WEAK_TTL)
+        if cached is not None:
+            return cached
+
+    # Fetch the page through the full ladder (direct → jina → wayback → deno).
+    # Probe doesn't need the whole page — cap chars to keep it cheap.
+    page = cmd_read(mod, args)
+    body = page.get("text") or ""
+    source = page.get("source", "")
+
+    blocked = page.get("blocked")
+    if blocked or page.get("challenge"):
+        result = {
+            "url": args.url,
+            "match": None,          # could not verify — page is a wall
+            "blocked": blocked or "generic",
+            "source": source,
+            "claim": args.claim,
+            "reason": "page is an anti-bot/login wall; retry with --proxy or use wayback",
+        }
+        if not args.no_cache:
+            _cache_put("probe", cache_key, result)
+        return result
+
+    hits = _extract_excerpts(body, args.claim)
+    result = {
+        "url": args.url,
+        "match": bool(hits),
+        "claim": args.claim,
+        "source": source,
+        "chars": len(body),
+        "excerpts": hits,           # up to 3 short evidence windows
+        "blocked": page.get("blocked"),
+    }
+    if source == "wayback":
+        result["wayback_ts"] = page.get("wayback_ts")
+        result["wayback_snapshot"] = page.get("wayback_snapshot")
+
+    if not args.no_cache:
+        _cache_put("probe", cache_key, result)
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  argparse
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_parser():
-    ap = argparse.ArgumentParser(description="Hermes Web Tools Bridge v2")
-    ap.add_argument("cmd", choices=["search", "read", "image", "expand", "render"],
+    ap = argparse.ArgumentParser(description="Hermes Web Tools Bridge v3")
+    ap.add_argument("cmd", choices=["search", "read", "image", "expand", "render", "probe"],
                     help="Subcommand")
     # shared
     ap.add_argument("--out", default="",
@@ -567,10 +699,11 @@ def _build_parser():
     # search
     ap.add_argument("--query", default="", help="Search query")
     ap.add_argument("--max-validate", type=int, default=8, help="Max URLs to validate")
-    # read / render
+    # read / render / probe
     ap.add_argument("--url", default="", help="URL to fetch")
     ap.add_argument("--max-chars", type=int, default=8000, help="Max text chars")
     ap.add_argument("--no-wayback", action="store_true", help="Skip Wayback fallback")
+    ap.add_argument("--claim", default="", help="Claim to verify (for probe)")
     # render (Deno)
     ap.add_argument("--render-timeout", type=float, default=RENDER_TIMEOUT,
                     help="Deno render worker timeout in seconds (default 8.0)")
@@ -619,6 +752,8 @@ def main():
             result = cmd_expand(mod, args)
         elif args.cmd == "render":
             result = cmd_render(mod, args)
+        elif args.cmd == "probe":
+            result = cmd_probe(mod, args)
     except Exception as e:
         result["error"] = repr(e)
         result["trace"] = traceback.format_exc()
@@ -627,7 +762,8 @@ def main():
         json.dump(result, f, ensure_ascii=False, indent=2)
 
     # ASCII-only status line (no cp1251 crashes)
-    items = len(result.get("top") or result.get("images") or result.get("items") or [])
+    items = len(result.get("top") or result.get("images") or result.get("items")
+                 or result.get("excerpts") or [])
     status = "OK" if "error" not in result else "ERR"
     print("STATUS=%s cmd=%s items=%d" % (status, args.cmd, items), flush=True)
 
