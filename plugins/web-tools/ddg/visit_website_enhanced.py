@@ -268,6 +268,39 @@ def _fetch_jina(url):
     return None
 
 
+def _fetch_wayback(url):
+    """Wayback Machine fallback — return snapshot HTML or None.
+
+    Uses archive.org's /wayback/available API to find the latest snapshot,
+    then fetches the plain URL (with toolbar, NOT the ``id_`` variant — the
+    ``id_`` URL is unreliable, returning 503). 429 rate-limits are retried
+    once with a 3s backoff.
+    """
+    import urllib.request, json, time as _time
+    api = "https://archive.org/wayback/available?url=" + urllib.parse.quote(url, safe="")
+    req = urllib.request.Request(api, headers={"User-Agent": "Hermes/2.0"})
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except Exception:
+            if attempt == 0:
+                _time.sleep(3)
+                continue
+            return None
+    snap = data.get("archived_snapshots", {}).get("closest")
+    if snap and snap.get("status") and snap["status"][0] in ("2", "3"):
+        snap_url = snap.get("url", "")
+        fetch_url = snap_url.replace("http://", "https://")
+        if not fetch_url:
+            fetch_url = f"https://web.archive.org/web/{url}"
+        html = _fetch(fetch_url)
+        if html and len(html) > 300:
+            return html
+    return None
+
+
 def _is_antibot_jina(body):
     """Fail-open Jina CAPTCHA/Cloudflare challenge detection (agent-reach port)."""
     try:
@@ -342,19 +375,65 @@ def _is_blocked(html):
     return False
 
 def _get_block_type(html):
-    """Identify the specific type of block. Only hard blocks."""
+    """Identify the specific type of block. Only hard blocks.
+
+    Returns a STABLE code agents/pipelines can branch on:
+      cloudflare | aws_waf | recaptcha | captcha | login | access_denied |
+      rate_limited | service_unavailable | regional_block | js_required |
+      cookies_required | unknown
+    """
     if not html:
         return "unknown"
     text_lower = html.lower()
-    
-    if 'cf-chl-check' in text_lower or 'checking your browser' in text_lower or 'challenge-platform' in text_lower or 'cdn-cgi' in text_lower:
-        return 'cloudflare'
+
+    # ── Vendor-specific anti-bot walls (most specific first) ──
+    # AWS WAF challenge (IMDB, many .gov/.edu): HTTP 202 + challenge.js
+    if any(m in text_lower for m in ("awswaf", "token.awswaf", "challenge.js",
+                                     "aws.waf", "awswaf-token")):
+        return "aws_waf"
+    # Cloudflare: Turnstile, cf-chl, challenge-platform, interstitial
+    if any(m in text_lower for m in ("cf-chl-check", "checking your browser",
+                                     "challenge-platform", "cf_chl_", "cf-chl-",
+                                     "cf-clearance", "turnstile",
+                                     "attention required", "just a moment")):
+        return "cloudflare"
+    # Google reCAPTCHA — only REAL widget/verify pages, never word mentions
+    if ("recaptcha" in text_lower and
+            ("g-recaptcha" in text_lower or "verify" in text_lower)):
+        return "recaptcha"
+    if "hcaptcha" in text_lower and ("challenge" in text_lower or "hcaptcha-widget" in text_lower):
+        return "captcha"
     if 'captcha' in text_lower:
         return 'captcha'
+
+    # ── Login wall (not anti-bot) ──
+    login_hits = sum(1 for m in ("log in", "sign in", "login required",
+                                 "please log in", "sign in to continue",
+                                 "log in to continue", "you must be logged in")
+                     if m in text_lower)
+    if login_hits >= 2 and len(html) < 20000:
+        return "login"
+
+    # ── Plain status/JS walls ──
     if 'access denied' in text_lower or '403 forbidden' in text_lower:
         return 'access_denied'
     if '429 too many' in text_lower:
         return 'rate_limited'
+    if '503 service unavailable' in text_lower:
+        return 'service_unavailable'
+    if any(m in text_lower for m in ("turn on javascript", "javascript is disabled",
+                                     "enable javascript and then reload",
+                                     "you need to enable javascript",
+                                     "requires javascript", "enable javascript")):
+        return "js_required"
+    if 'enable cookies' in text_lower:
+        return 'cookies_required'
+    # Russian regional blocks
+    if any(m in text_lower for m in ("данный контент недоступен", "доступ к данной странице ограничен",
+                                     "эта страница недоступна", "контент заблокирован",
+                                     "доступ запрещён", "доступ закрыт", "ресурс заблокирован",
+                                     "доступ временно ограничен", "доступ приостановлен")):
+        return "regional_block"
     return 'unknown'
 
 def _strip_block_overlay(html):
@@ -751,7 +830,15 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
             html = jina_html
             source = "jina"
         else:
-            return {"error": "Failed to fetch page via any method", "content": "", "source": "failed", "url": url}
+            # ── Step 2b: Wayback Machine fallback ──
+            # Direct + Jina both failed or returned challenge shells. Try the
+            # nearest archive.org snapshot (historical content, honestly labeled).
+            wb_html = _fetch_wayback(url)
+            if wb_html:
+                html = wb_html
+                source = "wayback"
+            else:
+                return {"error": "Failed to fetch page via any method", "content": "", "source": "failed", "url": url}
     else:
         source = "direct"
     

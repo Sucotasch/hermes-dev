@@ -612,6 +612,14 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                         raw_html = None
                 except Exception:
                     pass
+            # Wayback Machine fallback when direct + Jina both failed
+            if not raw_html or len(raw_html) < 300:
+                try:
+                    raw_html = vwe._fetch_wayback(url)
+                    if raw_html and log:
+                        log(f"    [wayback] recovered from archive.org: {url[:60]}")
+                except Exception:
+                    pass
             if not raw_html or len(raw_html) < 300:
                 skipped_fetch += 1
                 if log:
