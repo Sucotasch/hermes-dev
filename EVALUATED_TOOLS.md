@@ -49,6 +49,13 @@ own PDF parser, own search aggregator).
 **Honest limits (theirs):** no login sites; no ML-DSA post-quantum (BoringSSL);
 search rate-limits without a proxy; not built for mass scraping.
 
+**Verified limitation: does NOT solve Cloudflare JS challenges.** DonSeTch's
+tier-1 real-TLS fetch can reach many Cloudflare sites (the "behind the wall"
+content), but when the site requires a full JS challenge (cf_clearance cookie),
+the solve-and-bounce browser tier is needed — and that tier is blocked in the
+DSH sandbox (`OpenProcess failed: 5`). Outside the sandbox, the browser tier
+would work, so DonSeTch remains a credible upgrade for unsandboxed use.
+
 **Why we did NOT adopt it outright:** in our current DSH sandbox the headless
 browser tier fails (`OpenProcess failed: 5`, cannot create cache under
 `%LOCALAPPDATA%` because the sandbox blocks it; `dirs` crate reads the real
@@ -82,8 +89,8 @@ structure-first: layout/pixels are generated only on demand. Use via CLI
 
 **Standout capabilities (verified on this machine, v1.1.1):**
 - Real V8 + network stack — executes **external** `<script src>`, so it renders
-  SPAs and passes JS-based anti-bot challenges (Cloudflare/AWS WAF) — unlike
-  our Deno happy-dom worker (inline JS only, sandboxed no-net).
+  SPAs (React/Vue/Next.js CSR sites that ship an empty `<div id="root">`) that
+  our Deno happy-dom worker (inline JS only, sandboxed no-net) cannot extract.
 - Structure-first: `moli fetch --dump markdown` skips layout/paint entirely for
   text extraction; screenshots only on demand. Median RSS 73 MiB vs 773 MiB
   Chrome Headless; ~15% of Chrome's CPU on agent workloads (Lexbench).
@@ -92,14 +99,24 @@ structure-first: layout/pixels are generated only on demand. Use via CLI
 - Honest limits: no GPU/WebGL/Canvas parity, no pixel-perfect Chrome; 81.9%
   task success (Chrome 99.8%) on Lexbench-Headless-Browser; login walls remain.
 
-**Why we adopted it as a render tier (not as a replacement):** inside the DSH
-sandbox its HTTPS stack is blocked (HTTP works, TLS fails <50 ms even via
-proxy — same sandbox class as the git schannel issue), so it cannot replace
-the bridge there. Outside the sandbox it is the strongest full-JS render
-option we have. We vendored the binary (`moli/moli.exe`, gitignored) and wired
-it as `mfetch` / the tier-2 escalation in `cmd_render` — fail-open: any Moli
-failure falls back to the plain read ladder. Works with `--proxy` for geo/rate
-blocks; needs the NecoBox proxy in proxy mode for HTTPS from the sandbox host.
+**⚠️ Verified limitation — does NOT solve Cloudflare/AWS WAF challenges.** We
+tested `moli fetch --dump semantic_tree_text --wait-until done` on
+stackoverflow.com: it returns the «Just a moment...» challenge interstitial,
+identical to curl_cffi — no `cf_clearance`/Turnstile solving in `fetch` mode.
+Same for AWS WAF (IMDB). So Moli is a **SPA renderer, not an anti-bot bypass**;
+for challenged pages the read ladder's wayback fallback stays the answer.
+
+**Why we adopted it as a render tier (not as a replacement):** the DSH sandbox
+blocks Moli's HTTPS stack in the default mode (HTTP works, TLS fails <50 ms —
+same sandbox class as the git schannel issue). **BUT with the standard
+`sandbox_permissions: danger-full-access` escalation on the pwsh call, Moli's
+HTTPS works inside the sandbox too** (verified: `mfetch` → `source: moli`,
+`https://example.com` returns real content). This is the designed DSH approval
+mechanism, not a hack — same level as the git token fix. We vendored the binary
+(`moli/moli.exe`, gitignored) and wired it as `mfetch` / the tier-2 escalation
+in `cmd_render` — fail-open: any Moli failure falls back to the plain read
+ladder. Works with `--proxy` for geo/rate blocks; needs the NecoBox proxy in
+proxy mode for HTTPS from the sandbox host.
 
 ## What we are porting into webtools_bridge
 
