@@ -193,7 +193,35 @@ def _has_query_keywords(text, query_str):
     return False
 
 
-# Platform domains: use hostname+path dedup instead of base domain
+def _strict_url_title_match(url, title, query):
+    """Strict URL/title keyword hit — NO descriptive-title fallback. Used by
+    visual img_bonus gates, where a long title on a product landing page
+    (microsoft.com/.../word) must not earn the gallery bonus. Returns True
+    only when an actual query keyword appears in URL or title."""
+    if not query:
+        return False
+    words = [w.lower() for w in query.split() if len(w) >= 3]
+    if not words:
+        return False
+    hay = "{} {}".format(url or "", title or "").lower()
+    return any(w in hay for w in words)
+
+
+def _visual_gallery_signal(url, title):
+    """URL/title looks like an image gallery, not a product landing page
+    with icon soup. Used by visual-query img_bonus gates — pages that match
+    get the bonus; pages without the signal (microsoft.com, intel.com,
+    google.com product pages) are skipped even if they have 80+ images."""
+    if not url and not title:
+        return False
+    hay = "{} {}".format((url or "").lower(), (title or "").lower())
+    GALLERY_HINTS = (
+        "gallery", "wallpapers", "wallpaper", "ai-generated",
+        "artwork", "ai-art", "art-ai", "generated", "photo",
+        "photos", "pictures", "pics", "illustration",
+        "image", "img", "text2img", "text-to-image",
+    )
+    return any(h in hay for h in GALLERY_HINTS)
 # These hosts contain thousands of distinct blogs/pages under one domain
 _PLATFORM_DOMAINS = {
     "blogspot.com", "blogspot.co.uk", "blogspot.de", "blogspot.fr",
@@ -456,10 +484,15 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
             if query_type == "visual" and body:
                 item["val_images"] = ddg_search.extract_fullsize_images(body, url)[:20]
             text_rel = ddg_search.content_relevance_score(query, text)
-            # Visual img_bonus: 15+ images is a strong gallery signal even
-            # without text keywords (JS-heavy pages may show little text).
+            # Visual img_bonus: 15+ images is a strong gallery signal, but
+            # only if the page URL/title carries query keywords (icon-heavy
+            # product pages like microsoft.com also have 80+ images — they
+            # must not get the bonus). Text keywords are checked first, URL/
+            # title fallback handles JS-heavy gallery pages with little text.
             has_keywords = _has_query_keywords(text, query)
-            if query_type == "visual" and img_count >= 15:
+            url_match = _strict_url_title_match(url, item.get("title", ""), query)
+            gallery_signal = _visual_gallery_signal(url, item.get("title", ""))
+            if query_type == "visual" and img_count >= 15 and (has_keywords or url_match or gallery_signal):
                 img_bonus = min((img_count - 14) * 0.02, 0.25)
             else:
                 img_bonus = 0
@@ -753,6 +786,8 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
             img_count = len(imgs)
             is_visual = query_type == "visual"
             has_keywords = _has_query_keywords(text, query)
+            _url_candidate = _strict_url_title_match(url, p.get("title", ""), query)
+            _gallery_signal = _visual_gallery_signal(url, p.get("title", ""))
 
             # Text threshold: 300 for normal, 50 for visual (image-heavy pages may have little text)
             min_text = 50 if is_visual else 300
@@ -761,7 +796,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 # Visual img_bonus: 15+ images on a gallery page is a strong
                 # signal even without text keywords (JS-heavy galleries often have
                 # little visible text). Use URL/title as fallback keyword check.
-                if is_visual and img_count >= 15:
+                if is_visual and img_count >= 15 and (has_keywords or _url_candidate or _gallery_signal):
                     img_bonus = min((img_count - 14) * 0.02, 0.25)
                 else:
                     img_bonus = 0
@@ -792,7 +827,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                         "source_page": url,
                         "source_title": p.get("title", ""),
                     })
-            elif is_visual and img_count >= 3:
+            elif is_visual and img_count >= 3 and (has_keywords or _gallery_signal or _url_candidate):
                 # Visual page with keywords but little text — keep if enough images
                 p["deep_text"] = text or ""
                 p["img_count"] = img_count
@@ -803,7 +838,8 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                 deep_pages.append(p)
                 domain_counts[key] = domain_counts.get(key, 0) + 1
                 if log:
-                    log(f"    OK [{len(deep_pages)}] visual-only imgs={img_count} kw=✓ text={text_len} | {url[:60]}")
+                    kw_mark = " kw=✓" if has_keywords else (" img=✓" if _gallery_signal else "")
+                    log(f"    OK [{len(deep_pages)}] visual-only imgs={img_count}{kw_mark} text={text_len} | {url[:60]}")
                 for img_url in (imgs if max_imgs_per_page <= 0 else imgs[:max_imgs_per_page]):
                     all_images.append({
                         "url": img_url,
@@ -1306,10 +1342,12 @@ def run_deep_research(query, server_url="http://localhost:8888",
         rel = deep if deep is not None else ddg_search.content_relevance_score(query, snippet)
         img_count = p.get("img_count", 0)
         has_kw = _has_query_keywords(snippet, query)
-        # Keep if relevance passes threshold OR (visual + images, keywords not
-        # required — gallery pages often have JS-heavy, keyword-poor text; the
-        # URL/title from search results already carried the query terms)
-        if rel >= img_threshold or (query_type == "visual" and img_count >= 3):
+        url_match = _strict_url_title_match(p.get("url", ""), p.get("title", ""), query)
+        gallery_signal = _visual_gallery_signal(p.get("url", ""), p.get("title", ""))
+        # Keep if relevance passes threshold OR (visual + images + gallery/URL
+        # signal — product landing pages with icon soup must not contribute
+        # images to the pool)
+        if rel >= img_threshold or (query_type == "visual" and img_count >= 3 and (has_kw or url_match or gallery_signal)):
             relevant_urls.add(p.get("url"))
     img_from_irrelevant = 0
     img_dedup = 0
@@ -1379,8 +1417,12 @@ def run_deep_research(query, server_url="http://localhost:8888",
         else:
             snippet = p.get("snippet", "") or (text[:500] if text else "")
             relevance = round(ddg_search.content_relevance_score(query, snippet), 2)
-            # Visual img_bonus: only if keywords present AND 15+ images (gallery)
-            if is_visual and has_keywords and img_count >= 15:
+            # Visual img_bonus: 15+ images is a strong gallery signal, but
+            # only if the page URL/title suggests a gallery (product landing
+            # pages with icon soup like microsoft.com must not get the bonus).
+            _url_candidate = _strict_url_title_match(url, p.get("title", ""), query)
+            _gallery_signal = _visual_gallery_signal(url, p.get("title", ""))
+            if is_visual and img_count >= 15 and (has_keywords or _url_candidate or _gallery_signal):
                 img_bonus = min((img_count - 14) * 0.02, 0.25)
             else:
                 img_bonus = 0
