@@ -40,7 +40,9 @@ Examples:
     )
     parser.add_argument("query", help="Research query")
     parser.add_argument("--server", default="http://localhost:8888",
-                        help="llama.cpp server URL (default: http://localhost:8888)")
+                        help="LLM server URL (OpenAI-compatible, default: http://localhost:8888)")
+    parser.add_argument("--model", default="local",
+                        help="Model name to use (default: local; for Ollama use e.g. ministral-3:14b)")
     parser.add_argument("--validate", type=int, default=50,
                         help="Max URLs to validate (default: 50)")
     parser.add_argument("--output", "-o", default=None,
@@ -61,6 +63,7 @@ Examples:
     result = run_deep_research(
         query=args.query,
         server_url=args.server,
+        model=args.model,
         max_validate=args.validate,
         verbose=not args.quiet,
     )

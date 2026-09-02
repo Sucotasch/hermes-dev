@@ -574,6 +574,73 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
     return validated, alive_count
 
 
+def _is_pdf_url(url):
+    """Check if URL likely points to a PDF document."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    if path.endswith(".pdf"):
+        return True
+    # arxiv: /pdf/2412.19437 (no .pdf extension)
+    if parsed.hostname and "arxiv.org" in parsed.hostname and path.startswith("/pdf/"):
+        return True
+    return False
+
+
+def _fetch_pdf_text(url, max_bytes=4*1024*1024, max_pages=30):
+    """Download PDF and extract text via pypdf (pure Python, fail-open)."""
+    try:
+        import io, urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 Hermes-deep-research"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = resp.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+        if not data[:5].startswith(b"%PDF"):
+            return None
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        out = []
+        for i, page in enumerate(reader.pages):
+            if i >= max_pages:
+                break
+            try:
+                t = page.extract_text() or ""
+            except Exception:
+                t = ""
+            if t:
+                out.append(t)
+        text = "\n".join(out)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text if len(text) > 200 else None
+    except Exception:
+        return None
+
+
+def _candidate_matches_query(url, title, query):
+    """Cheap pre-filter for Level-2 candidates: does the URL or link title
+    contain query keywords? Network-free — used BEFORE validation to drop
+    navigation/social links (which always validate alive but score 0.00).
+
+    CONSERVATIVE (must not starve rare-topic expansion):
+    - drop ONLY when NO query keyword appears in URL/title AND the link title
+      is short (<30 chars, nav-label shaped);
+    - any keyword hit OR a descriptive (long) title keeps the candidate.
+    """
+    words = [w.lower() for w in query.split() if len(w) >= 3]
+    if not words:
+        return True
+    haystack = "{} {}".format(url or "", title or "").lower()
+    hit = any(w in haystack for w in words)
+    if hit:
+        return True
+    # No keyword anywhere: keep descriptive titles (real articles/rare-topic
+    # pages often paraphrase the query), drop only short nav labels.
+    title_len = len((title or "").strip())
+    return title_len >= 30
+
+
 def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, query_type="general", max_imgs_per_page=5):
     """Deep-read pages: fetch full content + extract images from raw HTML.
     Applies content cleaning, relevance filtering, and domain dedup (max 1 per dedup key).
@@ -588,6 +655,8 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
     _deep_read_start = time.monotonic()
     from urllib.parse import urlparse
 
+    # ── Phase 1: domain dedup filter (cheap, no network) ──
+    candidates = []
     for p in pages[:top_n * 3]:
         url = p.get("url", "")
         if not url:
@@ -598,10 +667,36 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
             if log:
                 log(f"    [skip] dedup ({key}): {url[:60]}")
             continue
+        domain_counts[key] = domain_counts.get(key, 0) + 1
+        candidates.append(p)
+
+    # ── Phase 2: parallel direct fetch (3 workers; PDF/HTML). Jina & Wayback
+    # fallbacks stay sequential (rate-limited services — do not parallelize).
+    direct_results = {}
+
+    def _fetch_direct(p):
+        url = p.get("url", "")
         if log:
             log(f"    Reading: {url[:70]}...")
+        if _is_pdf_url(url):
+            pdf_text = _fetch_pdf_text(url)
+            if pdf_text:
+                if log:
+                    log(f"    [pdf] extracted {len(pdf_text)} chars via pypdf: {url[:60]}")
+                return url, pdf_text
+            return url, None
+        return url, vwe._fetch(url)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for url, raw in ex.map(_fetch_direct, candidates):
+            direct_results[url] = raw
+
+    # ── Phase 3: sequential processing (fallbacks + parse + score) ──
+    for p in candidates:
+        url = p.get("url", "")
         try:
-            raw_html = vwe._fetch(url)
+            raw_html = direct_results.get(url)
             # Jina fallback for JS-heavy sites (Wikipedia, etc.)
             if not raw_html or len(raw_html) < 500:
                 try:
@@ -727,6 +822,33 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
         log(f"  Deep-read summary: {len(deep_pages)} pages read, {len(all_images)} images")
         log(f"  Skipped: {skipped_dom} domain-dedup, {skipped_fetch} fetch-fail, {skipped_short} short, {skipped_relevance} low-relevance")
     return deep_pages, all_images
+
+
+def _filter_images_light(images, log=None):
+    """Network-free image filter for non-visual queries: drop SVG/logo/icon/
+    avatar/nav chrome without downloading anything. Keeps photos and content
+    images. Fail-open: no downloads, so no rate-limit risk."""
+    if not images:
+        return images
+    SKIP_FRAGMENTS = (
+        "/logo", "logo.", "logos/", "logo_", "-logo", "logo-",
+        "/icons/", "/icon/", "icon.", "favicon", "avatar", "avatars",
+        "nav-", "hamburger", "sprites", "sprite.", "badge", "badges",
+        "emoji", "emoji/", "tracking", "pixel", "1x1", "spacer",
+        "social-share", "share-icon", "btn_", "button", "separator",
+        "loading", "loader", "placeholder", "watermark", "banner-cta",
+    )
+    SKIP_EXTS = (".svg", ".ico", ".gif", ".bmp", ".cur", ".tiff", ".webp?")
+    kept, dropped = [], 0
+    for img in images:
+        u = (img.get("url") or "").lower()
+        if u.endswith(SKIP_EXTS) or any(f in u for f in SKIP_FRAGMENTS):
+            dropped += 1
+            continue
+        kept.append(img)
+    if log and dropped:
+        log(f"    Image light-filter: {len(images)} -> {len(kept)} (dropped {dropped} logo/icon/nav)")
+    return kept
 
 
 def _filter_images_for_report(images, log=None):
@@ -1090,6 +1212,14 @@ def run_deep_research(query, server_url="http://localhost:8888",
                                 continue
                         except Exception:
                             pass
+                        # Keyword pre-filter: drop navigation/social/feed links
+                        # that always validate alive but score 0.00 (they cost a
+                        # validation request for nothing). Lenient: keep when ANY
+                        # query keyword appears in URL or link title. Visual
+                        # queries skip this — gallery URLs rarely carry keywords.
+                        if query_type != "visual" and not _candidate_matches_query(
+                                href, link.get("text", ""), query):
+                            continue
                         # Dedup-key cap before enqueueing (2 per registrable domain)
                         key = _dedup_key(href)
                         if key_counts.get(key, 0) >= 2:
@@ -1167,12 +1297,17 @@ def run_deep_research(query, server_url="http://localhost:8888",
             log(f"    IMG: {img['url'][:80]} from {img['source'][:60]}")
     images = images if images_count <= 0 else images[:images_count]
 
-    # Step 8b: For visual queries — filter by format, dedup by content, check size
-    if query_type == "visual" and images:
+    # Step 8b: Filter images — visual queries get the heavy download-based
+    # filter (format/hash/size), all others get the network-free light filter
+    # (drop SVG/logo/icon/nav chrome without downloading anything).
+    if images:
         before_count = len(images)
-        images = _filter_images_for_report(images, log)
+        if query_type == "visual":
+            images = _filter_images_for_report(images, log)
+        else:
+            images = _filter_images_light(images, log)
         if log:
-            log(f"  Image filter: {before_count} → {len(images)} (format/dedup/size)")
+            log(f"  Image filter: {before_count} → {len(images)}")
 
     # Step 9: Build evidence — only pages with actual content
     evidence = []
@@ -1248,10 +1383,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
     log("Synthesizing conclusions...")
     t = time.time()
 
-    # Give LLM the evidence content for synthesis
+    # Give LLM the evidence content for synthesis. Top-3 sources get the FULL
+    # BM25 chunk (4000 chars) — key numbers/facts usually live deeper than the
+    # first 1500 chars; the rest get the shorter preview to stay in context.
     evidence_content = ""
     for i, e in enumerate(evidence[:llm_sources]):
-        content_preview = e['content'][:1500] if e['content'] else ""
+        limit = 4000 if i < 3 else 1500
+        content_preview = e['content'][:limit] if e['content'] else ""
         evidence_content += f"\n--- Source {i+1}: {e['title']} ---\n{content_preview}\n"
 
     synthesis = chat_completion([
