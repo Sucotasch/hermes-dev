@@ -1181,54 +1181,78 @@ def run_deep_research(query, server_url="http://localhost:8888",
             key = _dedup_key(p.get("url", ""))
             key_counts[key] = key_counts.get(key, 0) + 1
         level2_urls = []
-        for url in top_urls:
+        # Per-URL hard cap for expansion fetches: the inner chain
+        # (direct -> Jina -> Wayback) has its own timeouts, but a hung
+        # connection can still stall the whole L2 loop for minutes.
+        # Use a daemon thread per URL with join(timeout): abandon the URL
+        # on timeout and move on (the thread stays in background until its
+        # own inner timeouts fire — acceptable, bounded by 25s).
+        _L2_VISIT_TIMEOUT = 20.0
+        import threading as _l2t
+
+        def _l2_fetch(url, store):
+            """Fetch one URL for L2 expansion; store result in dict."""
             try:
-                page = vwe.visit_website(url, max_chars=5000)
-                for link in page.get("links", []):
-                    href = link.get("url", "")
-                    if href and href not in seen_urls and not ddg_search.is_blocked_domain(href):
-                        href_lower = href.lower()
-                        if query_type != "video" and (
-                            any(d in href_lower for d in _VIDEO_DOMAINS) or
-                            any(p in href_lower for p in _VIDEO_PATH_PATTERNS)):
-                            continue
-                        # Ad/tracker hosts + junk transitions (forum chrome) for
-                        # expansion candidates (page links, not search results).
-                        try:
-                            from junk_filter import is_ad_url, should_skip_junk_url
-                            if is_ad_url(href) or should_skip_junk_url(href):
-                                continue
-                        except Exception:
-                            pass
-                        # Skip utility/homepage-ish links (report-abuse, login,
-                        # feeds, contact…). Token-based AND first-segment-only:
-                        # a utility token mid-path (e.g. 'gallery/contact-x')
-                        # is never enough to drop a candidate.
-                        try:
-                            lpath = urlparse(href).path.strip("/").lower()
-                            path_tokens = re.split(r"[^a-z0-9]+", lpath)
-                            first = path_tokens[0] if path_tokens else ""
-                            if lpath in _HOMEPAGE_PATHS or first in _UTILITY_TOKENS:
-                                continue
-                        except Exception:
-                            pass
-                        # Keyword pre-filter: drop navigation/social/feed links
-                        # that always validate alive but score 0.00 (they cost a
-                        # validation request for nothing). Lenient: keep when ANY
-                        # query keyword appears in URL or link title. Visual
-                        # queries skip this — gallery URLs rarely carry keywords.
-                        if query_type != "visual" and not _candidate_matches_query(
-                                href, link.get("text", ""), query):
-                            continue
-                        # Dedup-key cap before enqueueing (2 per registrable domain)
-                        key = _dedup_key(href)
-                        if key_counts.get(key, 0) >= 2:
-                            continue
-                        key_counts[key] = key_counts.get(key, 0) + 1
-                        seen_urls.add(href)
-                        level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
+                store[url] = vwe.visit_website(url, max_chars=5000)
             except Exception:
-                pass
+                store[url] = None
+
+        for url in top_urls:
+            _store = {}
+            _th = _l2t.Thread(target=_l2_fetch, args=(url, _store), daemon=True)
+            _th.start()
+            _th.join(timeout=_L2_VISIT_TIMEOUT)
+            if _th.is_alive():
+                page = None
+                if log:
+                    log(f"    [skip] L2 visit timeout ({_L2_VISIT_TIMEOUT:.0f}s): {url[:60]}")
+            else:
+                page = _store.get(url)
+            if not page or not page.get("links"):
+                continue
+            for link in page.get("links", []):
+                href = link.get("url", "")
+                if href and href not in seen_urls and not ddg_search.is_blocked_domain(href):
+                    href_lower = href.lower()
+                    if query_type != "video" and (
+                        any(d in href_lower for d in _VIDEO_DOMAINS) or
+                        any(p in href_lower for p in _VIDEO_PATH_PATTERNS)):
+                        continue
+                    # Ad/tracker hosts + junk transitions (forum chrome) for
+                    # expansion candidates (page links, not search results).
+                    try:
+                        from junk_filter import is_ad_url, should_skip_junk_url
+                        if is_ad_url(href) or should_skip_junk_url(href):
+                            continue
+                    except Exception:
+                        pass
+                    # Skip utility/homepage-ish links (report-abuse, login,
+                    # feeds, contact…). Token-based AND first-segment-only:
+                    # a utility token mid-path (e.g. 'gallery/contact-x')
+                    # is never enough to drop a candidate.
+                    try:
+                        lpath = urlparse(href).path.strip("/").lower()
+                        path_tokens = re.split(r"[^a-z0-9]+", lpath)
+                        first = path_tokens[0] if path_tokens else ""
+                        if lpath in _HOMEPAGE_PATHS or first in _UTILITY_TOKENS:
+                            continue
+                    except Exception:
+                        pass
+                    # Keyword pre-filter: drop navigation/social/feed links
+                    # that always validate alive but score 0.00 (they cost a
+                    # validation request for nothing). Lenient: keep when ANY
+                    # query keyword appears in URL or link title. Visual
+                    # queries skip this — gallery URLs rarely carry keywords.
+                    if query_type != "visual" and not _candidate_matches_query(
+                            href, link.get("text", ""), query):
+                        continue
+                    # Dedup-key cap before enqueueing (2 per registrable domain)
+                    key = _dedup_key(href)
+                    if key_counts.get(key, 0) >= 2:
+                        continue
+                    key_counts[key] = key_counts.get(key, 0) + 1
+                    seen_urls.add(href)
+                    level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
         if level2_urls:
             log(f"  {len(level2_urls)} candidates")
             l2_val, l2_alive = _validate_urls(level2_urls[:30], 30, verbose, log, query_type=query_type, query=query)
