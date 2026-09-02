@@ -1,7 +1,8 @@
-# Evaluated alternatives — DonSeTch & ratsearch
+# Evaluated alternatives — DonSeTch, ratsearch & Moli
 
-Status: evaluated 2026-08-30. Recorded so the agent knows these projects exist
-and what is worth porting into our own web tooling (webtools_bridge + pipeline).
+Status: evaluated 2026-08-30 (DonSeTch, ratsearch) and 2026-09-02 (Moli).
+Recorded so the agent knows these projects exist and what is worth porting
+into our own web tooling (webtools_bridge + pipeline).
 
 ## Why we evaluate external projects at all
 
@@ -72,6 +73,34 @@ fact-fallback when live engines are down/rate-limited. `zimdump list` over a
 `wikipedia_en_all_nopic.zim` gives a full title index; `zimdump show --idx`
 gives article HTML → text. Cheap to add as another "backend" in our search.
 
+## 3. Moli — github.com/lexmount/moli (Rust headless browser)
+
+**What it is.** Production-ready headless browser for AI agents. A complete
+browser runtime (V8, DOM, CSS, network, storage) in ONE Rust binary (~97 MB),
+structure-first: layout/pixels are generated only on demand. Use via CLI
+(`moli fetch --dump markdown ...`), CDP, WebDriver Classic, or WebDriver BiDi.
+
+**Standout capabilities (verified on this machine, v1.1.1):**
+- Real V8 + network stack — executes **external** `<script src>`, so it renders
+  SPAs and passes JS-based anti-bot challenges (Cloudflare/AWS WAF) — unlike
+  our Deno happy-dom worker (inline JS only, sandboxed no-net).
+- Structure-first: `moli fetch --dump markdown` skips layout/paint entirely for
+  text extraction; screenshots only on demand. Median RSS 73 MiB vs 773 MiB
+  Chrome Headless; ~15% of Chrome's CPU on agent workloads (Lexbench).
+- Full protocol surface: CDP (`Playwright.connectOverCDP` works), WebDriver.
+- Output formats: HTML, Markdown, JSON, semantic text tree, screenshot, PDF.
+- Honest limits: no GPU/WebGL/Canvas parity, no pixel-perfect Chrome; 81.9%
+  task success (Chrome 99.8%) on Lexbench-Headless-Browser; login walls remain.
+
+**Why we adopted it as a render tier (not as a replacement):** inside the DSH
+sandbox its HTTPS stack is blocked (HTTP works, TLS fails <50 ms even via
+proxy — same sandbox class as the git schannel issue), so it cannot replace
+the bridge there. Outside the sandbox it is the strongest full-JS render
+option we have. We vendored the binary (`moli/moli.exe`, gitignored) and wired
+it as `mfetch` / the tier-2 escalation in `cmd_render` — fail-open: any Moli
+failure falls back to the plain read ladder. Works with `--proxy` for geo/rate
+blocks; needs the NecoBox proxy in proxy mode for HTTPS from the sandbox host.
+
 ## What we are porting into webtools_bridge
 
 Priority-ordered. Implemented items are marked.
@@ -88,6 +117,10 @@ Priority-ordered. Implemented items are marked.
   (shipped: `_challenge_kind` / `_is_login_gate`)
 - [x] **Reference handles** — compact `S3`/`L12` handles in search/read output
   to cut token cost for long agent sessions. (shipped: `handle` fields)
+- [x] **Moli full-browser tier** — vendored `moli/moli.exe` (gitignored) as
+  `mfetch` subcommand + tier-2 escalation in `cmd_render` (Deno → Moli → read
+  ladder). Real V8, external scripts, JS challenges; fail-open in the sandbox
+  where Moli's HTTPS is blocked. (shipped: `cmd_mfetch`, `_moli_fetch_call`)
 - [ ] **Cross-engine consensus in search** — tag each result with which engines
   surfaced it; prefer multi-engine agreement in relevance. (needs per-engine
   provenance from the ddgs backend — deferred)
@@ -102,3 +135,8 @@ Priority-ordered. Implemented items are marked.
   - env: needs `SSL_CERT_FILE` (or system certs) for TLS in sandbox
 - ratsearch repo: https://github.com/gbkorr/ratsearch
   - .zim archives: https://dumps.wikimedia.org/other/kiwix/zim/wikipedia/
+- Moli repo: https://github.com/lexmount/moli (Apache-2.0 / MIT)
+  - binary: GitHub Releases `moli-x86_64-pc-windows-msvc.zip` (~39MB archive,
+    ~97MB extracted moli.exe) → copy to `hermes-dev/moli/moli.exe` (gitignored)
+  - CLI: `moli fetch --dump markdown [--http-proxy ...] [--timeout ms] URL`
+  - env: `MOLI_BIN` (bridge override), `SSL_CERT_FILE`/`CURL_CA_BUNDLE` for TLS

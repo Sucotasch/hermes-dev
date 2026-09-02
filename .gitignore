@@ -22,3 +22,8 @@ deno/
 
 # Deno --node-modules-dir=auto artifact (recreated from vendored cache on first render call)
 node_modules/
+
+# Moli headless browser (vendored binary ~97 MB)
+# Copy from the extracted release zip to moli/moli.exe:
+#   Copy-Item "$src\moli.exe" "moli\moli.exe"
+moli/

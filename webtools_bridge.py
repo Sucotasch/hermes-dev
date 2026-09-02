@@ -125,6 +125,40 @@ def _render_available():
     return bool(_find_deno_bin()) and os.path.isfile(RENDER_WORKER) and bool(_find_deno_cache())
 
 
+# ── Moli full-browser render engine ────────────────────────────────────────
+# Moli 1.1.1 — production-ready headless browser for AI agents (Rust, one
+# binary ~97 MB). Unlike the Deno happy-dom worker, Moli has a real V8 and
+# network stack: it executes external <script src>, survives Cloudflare/AWS
+# WAF JS challenges, and renders SPAs. It is the "tier-2" escalation for
+# pages the lightweight ladder cannot read.
+#
+# Vendored into this repo (moli/moli.exe, gitignored). Resolution order:
+#   1. MOLI_BIN env
+#   2. this repo's moli/moli.exe (vendored)
+#   3. moli on PATH
+#
+# Sandbox note: the DSH harness sandbox blocks Moli's HTTPS stack (HTTP works,
+# TLS fails in <50 ms even via proxy) — same class of restriction as the git
+# schannel issue. cmd_mfetch is fail-open: it returns None on any Moli failure,
+# so the caller falls back to the plain read ladder. Outside the sandbox Moli
+# works and gives full-JS rendering.
+_MOLI_LOCAL = os.path.join(_REPO_ROOT, "moli", "moli.exe")
+MOLI_TIMEOUT = 30.0  # seconds
+
+
+def _find_moli_bin():
+    env = os.environ.get("MOLI_BIN")
+    if env and os.path.exists(env):
+        return env
+    if os.path.exists(_MOLI_LOCAL):
+        return _MOLI_LOCAL
+    return shutil.which("moli") or shutil.which("moli.exe")
+
+
+def _moli_available():
+    return bool(_find_moli_bin())
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Cache helpers
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -584,8 +618,8 @@ def cmd_render(mod, args):
                     }
 
     if result is None:
-        # Fail-open: fall back to the plain read path (direct → jina → wayback)
-        return cmd_read(mod, args)
+        # Fail-open: try Moli (full browser), then the plain read ladder
+        return cmd_mfetch(mod, args) if _moli_available() else cmd_read(mod, args)
 
     if not args.no_cache:
         if result.get("chars", 0) < 500:
@@ -593,6 +627,100 @@ def cmd_render(mod, args):
         else:
             _cache_put("render", cache_key, result)
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Moli full-browser render
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOUT):
+    """Run ``moli fetch --dump markdown`` and return the result dict or None.
+
+    Returns None on any failure (binary missing, timeout, TLS block in sandbox,
+    network error) — the caller should fall back to the read ladder.
+    """
+    moli = _find_moli_bin()
+    if not moli:
+        return None
+    cmd = [moli, "fetch", "--dump", "markdown", "--timeout", str(int(timeout * 1000))]
+    if proxy_url:
+        cmd.extend(["--http-proxy", proxy_url])
+    cmd.append(url)
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        stdout, _ = proc.communicate(timeout=timeout + 5)
+        if proc.returncode != 0 or not stdout.strip():
+            return None
+        # Moli's markdown output is plain text; extract title from first # heading
+        text = stdout.strip()
+        title = url
+        for line in text.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+        return {
+            "text": text,
+            "title": title,
+            "chars": len(text),
+        }
+    except Exception:
+        return None
+
+
+def cmd_mfetch(mod, args):
+    """Fetch a URL via Moli — full-browser JS rendering (real V8, loads
+    external scripts, passes Cloudflare/AWS WAF challenges). Fail-open: if
+    Moli is unavailable or fails (common in the DSH sandbox), falls back to
+    the plain read ladder (direct → jina → wayback).
+
+    Invoke standalone::
+
+        python webtools_bridge.py mfetch --url "https://..." --out ...
+
+    Or as an escalation in ``cmd_render``: Deno → Moli → read ladder.
+    """
+    if not args.url:
+        return {"error": "mfetch requires --url"}
+    cache_key = f"mfetch:{args.url}:{args.max_chars}"
+    if not args.no_cache:
+        cached = (_cache_get("mfetch", cache_key, READ_TTL)
+                  or _cache_get("read", cache_key, READ_TTL)
+                  or _cache_get("readweak", cache_key, READ_WEAK_TTL))
+        if cached is not None:
+            return cached
+
+    proxy = args.proxy_url if args.proxy else None
+    rendered = _moli_fetch_call(args.url, proxy, args.moli_timeout)
+    if rendered:
+        text = rendered["text"]
+        if _is_challenge_text(text):
+            # Moli returned a challenge shell too — treat as blocked
+            result = {
+                "url": args.url,
+                "title": rendered["title"],
+                "source": "moli",
+                "chars": rendered["chars"],
+                "text": text,
+                "challenge": True,
+                "blocked": _challenge_kind(text) or "generic",
+            }
+        else:
+            result = {
+                "url": args.url,
+                "title": rendered["title"],
+                "source": "moli",
+                "chars": rendered["chars"],
+                "text": text,
+            }
+        if not args.no_cache:
+            _cache_put("mfetch", cache_key, result)
+        return result
+
+    # Fail-open: fall back to the plain read ladder
+    return cmd_read(mod, args)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -683,7 +811,7 @@ def cmd_probe(mod, args):
 
 def _build_parser():
     ap = argparse.ArgumentParser(description="Hermes Web Tools Bridge v3")
-    ap.add_argument("cmd", choices=["search", "read", "image", "expand", "render", "probe"],
+    ap.add_argument("cmd", choices=["search", "read", "image", "expand", "render", "probe", "mfetch"],
                     help="Subcommand")
     # shared
     ap.add_argument("--out", default="",
@@ -704,11 +832,13 @@ def _build_parser():
     ap.add_argument("--max-chars", type=int, default=8000, help="Max text chars")
     ap.add_argument("--no-wayback", action="store_true", help="Skip Wayback fallback")
     ap.add_argument("--claim", default="", help="Claim to verify (for probe)")
-    # render (Deno)
+    # render / mfetch (Deno / Moli)
     ap.add_argument("--render-timeout", type=float, default=RENDER_TIMEOUT,
                     help="Deno render worker timeout in seconds (default 8.0)")
     ap.add_argument("--wait-ms", type=int, default=RENDER_WAIT_MS,
                     help="Grace period in ms for page scripts (default 500)")
+    ap.add_argument("--moli-timeout", type=float, default=MOLI_TIMEOUT,
+                    help="Moli browser timeout in seconds (default 30.0)")
     # expand
     ap.add_argument("--urls", default="", help="Comma-separated source URLs (for expand)")
     ap.add_argument("--max-new-links", type=int, default=10, help="Max new links to fetch")
@@ -754,6 +884,8 @@ def main():
             result = cmd_render(mod, args)
         elif args.cmd == "probe":
             result = cmd_probe(mod, args)
+        elif args.cmd == "mfetch":
+            result = cmd_mfetch(mod, args)
     except Exception as e:
         result["error"] = repr(e)
         result["trace"] = traceback.format_exc()
