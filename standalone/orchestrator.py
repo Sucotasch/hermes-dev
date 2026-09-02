@@ -456,9 +456,10 @@ def _validate_urls(urls, max_validate=100, verbose=True, log=None, query_type="g
             if query_type == "visual" and body:
                 item["val_images"] = ddg_search.extract_fullsize_images(body, url)[:20]
             text_rel = ddg_search.content_relevance_score(query, text)
-            # Visual img_bonus: only if keywords present AND 15+ images (gallery)
+            # Visual img_bonus: 15+ images is a strong gallery signal even
+            # without text keywords (JS-heavy pages may show little text).
             has_keywords = _has_query_keywords(text, query)
-            if query_type == "visual" and has_keywords and img_count >= 15:
+            if query_type == "visual" and img_count >= 15:
                 img_bonus = min((img_count - 14) * 0.02, 0.25)
             else:
                 img_bonus = 0
@@ -757,8 +758,10 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
             min_text = 50 if is_visual else 300
             if text_len >= min_text:
                 content_score = ddg_search.content_relevance_score(query, text)
-                # Visual img_bonus: only if keywords present AND 15+ images (gallery)
-                if is_visual and has_keywords and img_count >= 15:
+                # Visual img_bonus: 15+ images on a gallery page is a strong
+                # signal even without text keywords (JS-heavy galleries often have
+                # little visible text). Use URL/title as fallback keyword check.
+                if is_visual and img_count >= 15:
                     img_bonus = min((img_count - 14) * 0.02, 0.25)
                 else:
                     img_bonus = 0
@@ -789,7 +792,7 @@ def _deep_read_and_extract(pages, top_n=10, query="", verbose=True, log=None, qu
                         "source_page": url,
                         "source_title": p.get("title", ""),
                     })
-            elif is_visual and has_keywords and img_count >= 3:
+            elif is_visual and img_count >= 3:
                 # Visual page with keywords but little text — keep if enough images
                 p["deep_text"] = text or ""
                 p["img_count"] = img_count
@@ -1031,9 +1034,12 @@ def run_deep_research(query, server_url="http://localhost:8888",
     timings["classify"] = round(time.time() - t, 1)
     log(f"  query_type: {query_type} ({timings['classify']}s)")
 
-    # For visual queries: no image limit (user wants all relevant images)
+    # For visual queries: no image limit (user wants all relevant images);
+    # raise the per-page cap too so galleries yield their full image set.
     if query_type == "visual":
         images_count = 0
+        if max_imgs_per_page == 5:  # untouched default → raise for visual
+            max_imgs_per_page = 30
 
     # Step 1b: Enrich query with aliases (for person queries)
     enriched_query = query
@@ -1300,8 +1306,10 @@ def run_deep_research(query, server_url="http://localhost:8888",
         rel = deep if deep is not None else ddg_search.content_relevance_score(query, snippet)
         img_count = p.get("img_count", 0)
         has_kw = _has_query_keywords(snippet, query)
-        # Keep if relevance passes threshold OR (visual + keywords + images)
-        if rel >= img_threshold or (query_type == "visual" and has_kw and img_count >= 3):
+        # Keep if relevance passes threshold OR (visual + images, keywords not
+        # required — gallery pages often have JS-heavy, keyword-poor text; the
+        # URL/title from search results already carried the query terms)
+        if rel >= img_threshold or (query_type == "visual" and img_count >= 3):
             relevant_urls.add(p.get("url"))
     img_from_irrelevant = 0
     img_dedup = 0
@@ -1322,11 +1330,12 @@ def run_deep_research(query, server_url="http://localhost:8888",
     images = images if images_count <= 0 else images[:images_count]
 
     # Step 8b: Filter images — visual queries get the heavy download-based
-    # filter (format/hash/size), all others get the network-free light filter
-    # (drop SVG/logo/icon/nav chrome without downloading anything).
+    # filter (format/hash/size) AFTER the network-free light filter (name-based
+    # logo/icon/nav removal). All others get only the light filter.
     if images:
         before_count = len(images)
         if query_type == "visual":
+            images = _filter_images_light(images, log)
             images = _filter_images_for_report(images, log)
         else:
             images = _filter_images_light(images, log)
