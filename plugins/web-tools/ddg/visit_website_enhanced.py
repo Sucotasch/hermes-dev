@@ -796,12 +796,92 @@ def extract_fullsize_images(html, base_url=""):
     return resolved[:20]
 
 
+# ── PDF extraction (Crawl4AI-inspired; port of standalone orchestrator's
+#    _fetch_pdf_text so the Hermes pipeline gets the same capability) ─────────
+
+_PDF_MAX_BYTES = 4 * 1024 * 1024   # 4 MB — Crawl4AI 0.9.3 security fix size cap
+_PDF_MAX_PAGES = 30               # page count cap (denial-of-service bound)
+
+
+def _is_pdf_url(url):
+    """Cheap URL heuristic: is this worth a PDF attempt? (.pdf / arxiv /pdf/)"""
+    try:
+        from urllib.parse import urlparse as _urlparse
+        parsed = _urlparse(url or "")
+        path = (parsed.path or "").lower()
+        if path.endswith(".pdf"):
+            return True
+        if parsed.hostname and "arxiv.org" in parsed.hostname.lower() and path.startswith("/pdf/"):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _fetch_pdf_text(url, max_bytes=_PDF_MAX_BYTES, max_pages=_PDF_MAX_PAGES):
+    """Download PDF and extract text via pypdf (bounded, fail-open).
+
+    Bounded exactly like the standalone orchestrator's proven implementation:
+    ``max_bytes`` download cap + ``%PDF`` magic check + ``max_pages`` pages +
+    200-char minimum. Returns extracted text or None (caller falls through to
+    the regular fetch ladder — Jina can also render PDFs).
+    """
+    try:
+        import io, urllib.request
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 Hermes-deep-research"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = resp.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+        if not data[:5].startswith(b"%PDF"):
+            return None
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        out = []
+        for i, page in enumerate(reader.pages):
+            if i >= max_pages:
+                break
+            try:
+                t = page.extract_text() or ""
+            except Exception:
+                t = ""
+            if t:
+                out.append(t)
+        text = "\n".join(out)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text if len(text) > 200 else None
+    except Exception:
+        return None
+
+
 # ── Visit with full bypass ─────────────────────────────────────────────────
 def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_images=20):
     """
     Full visit flow with all bypass mechanisms.
     Returns structured dict with title, headings, links, images, content.
     """
+    # ── Step 0: PDF fast path (bounded pypdf extraction, fail-open) ──
+    # Only when the URL itself looks like a PDF — before the HTML fetch ladder
+    # so a PDF link yields text on the first request, not binary soup.
+    if _is_pdf_url(url):
+        pdf_text = _fetch_pdf_text(url)
+        if pdf_text:
+            title = (url.rsplit("/", 1)[-1] or url).split("?")[0]
+            title = re.sub(r"[_-]+", " ", title).strip() or url
+            return {
+                "title": title,
+                "headings": {},
+                "links": [],
+                "images": [],
+                "content": pdf_text[:max_chars],
+                "published": "",
+                "source": "pdf",
+                "url": url,
+            }
+        # PDF extraction failed — fall through to the regular ladder (Jina
+        # renders PDFs too, so a plain-HTML-looking PDF URL still has a path).
+
     # ── Step 1: Direct fetch via curl_cffi ──
     html = _fetch(url)
     
@@ -850,7 +930,12 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
     # Main-content extraction via trafilatura when installed (cleaner text =
     # better relevance scores and less boilerplate wasting the 1500-char/page
     # compact budget). Fail-open: legacy tag-strip fallback otherwise.
+    # Tables (Crawl4AI-fit-markdown-inspired): the main call stays
+    # favor_precision + no-tables for clean prose; a SECOND bounded call with
+    # include_tables=True harvests comparison/price/spec tables as a separate
+    # `tables` field — table text was previously discarded entirely.
     text = ""
+    tables_text = ""
     try:
         import trafilatura
 
@@ -863,6 +948,23 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
         )
         if extracted:
             text = re.sub(r'\s+', ' ', extracted).strip()
+        try:
+            tbl = trafilatura.extract(
+                html,
+                output_format="txt",
+                favor_recall=True,
+                include_tables=True,
+                include_comments=False,
+            )
+            if tbl:
+                # Keep only table lines trafilatura emits as pipe/whitespace
+                # rows — approximate marker: 2+ columns separated by pipes.
+                tbl_lines = [ln.strip() for ln in tbl.splitlines() if ln.strip()]
+                tbl_rows = [ln for ln in tbl_lines if ln.count("|") >= 1]
+                if tbl_rows:
+                    tables_text = re.sub(r'\s+', ' ', "\n".join(tbl_rows)).strip()[:2000]
+        except Exception:
+            tables_text = ""
     except Exception:
         text = ""
     if not text:
@@ -874,6 +976,26 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
     fullsize = extract_fullsize_images(html, url)
     js_data = extract_js_data(html)
 
+    # Head metadata (Crawl4AI extract_head-inspired, zero network): meta
+    # description / og:description / og:title and published-time from the
+    # already-fetched HTML. Feeds `description` (cheap relevance signal) and
+    # backfills `published` when htmldate is missing. Fail-open.
+    description = ""
+    meta_published = ""
+    try:
+        meta_soup = BeautifulSoup(html[:300000], "lxml")
+        desc_tag = (
+            meta_soup.find("meta", attrs={"name": "description"})
+            or meta_soup.find("meta", attrs={"property": "og:description"})
+        )
+        if desc_tag and desc_tag.get("content"):
+            description = re.sub(r'\s+', ' ', desc_tag.get("content", "")).strip()[:400]
+        pt_tag = meta_soup.find("meta", attrs={"property": "article:published_time"})
+        if pt_tag and pt_tag.get("content"):
+            meta_published = str(pt_tag.get("content", ""))[:32]
+    except Exception:
+        description, meta_published = "", ""
+
     # Optional: publication date (htmldate, same author as trafilatura). Used by
     # news/historical queries for recency-aware ranking. Fail-open.
     published = ""
@@ -883,6 +1005,8 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
         published = find_date(url, html) or ""
     except Exception:
         published = ""
+    if not published and meta_published:
+        published = meta_published
 
     result = {
         "title": parser.title,
@@ -894,6 +1018,10 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
         "source": source,
         "url": url,
     }
+    if description:
+        result["description"] = description
+    if tables_text:
+        result["tables"] = tables_text
     if fullsize:
         result["fullsize_images"] = fullsize
     if js_data:

@@ -79,7 +79,16 @@ def _safe_search_deep(query, validate=True, max_validate=200, query_variants=Non
     )
 
 
-def _safe_expand(source_urls, query, max_new_links=25):
+def _safe_expand(source_urls, query, max_new_links=25, boost_terms=None):
+    """Collect Level-2 candidates from source pages' hyperlinks.
+
+    Best-first ordering (Crawl4AI BestFirstCrawlingStrategy-inspired): every
+    candidate is scored BEFORE any fetch — anchor-text term hits weigh double
+    URL hits, and optional ``boost_terms`` (uncovered-aspect words from
+    _coverage.aspect_boost_terms) add +1 per hit so expansion targets the
+    facets Level 1 could not cover. Candidates are fetched in that order by
+    the caller, so the fetch budget is spent on the best links first.
+    """
     if not isinstance(source_urls, list):
         source_urls = [source_urls]
     if visit_website_enhanced is None:
@@ -92,6 +101,8 @@ def _safe_expand(source_urls, query, max_new_links=25):
 
     uniq = {}
     query_terms = [t.lower() for t in re.findall(r"\b\w+\b", query.lower()) if len(t) > 2]
+    boost = [t.lower() for t in (boost_terms or []) if t]
+    boost_set = set(boost) - set(query_terms)
 
     for url in source_urls:
         try:
@@ -129,7 +140,12 @@ def _safe_expand(source_urls, query, max_new_links=25):
             if href in uniq:
                 continue
 
-            score = sum(1 for t in query_terms if t in anchor.lower() or t in href.lower())
+            anchor_low = anchor.lower()
+            href_low = href.lower()
+            score = sum(2 for t in query_terms if t in anchor_low)
+            score += sum(1 for t in query_terms if t in href_low)
+            score += sum(2 for t in boost_set if t in anchor_low)
+            score += sum(1 for t in boost_set if t in href_low)
             uniq[href] = {
                 "url": href,
                 "anchor": anchor,
@@ -146,19 +162,39 @@ def _safe_expand(source_urls, query, max_new_links=25):
     }
 
 
-def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000, baseline_texts=None):
+def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000, baseline_texts=None, baseline_urls=None, boost_terms=None, extra_candidates=None):
     """Level-2 expansion + fetch: return candidate list plus fetched page snippets.
 
     Saturation guard: pages that are near-duplicates of Level-1 evidence or of
     pages already fetched this round are skipped; after ``_SATURATION_STREAK``
     consecutive redundant pages the expansion stops (no new information).
+
+    ``baseline_urls`` (Level-1 URLs already in evidence) are skipped BEFORE
+    fetching — previously the fetch budget was spent on URLs that the final
+    seen-page dedup would drop anyway. ``boost_terms`` (uncovered-aspect words)
+    steer candidate ordering toward uncovered facets. ``extra_candidates``
+    (sitemap-seeded URLs from sitemap_seeding) are merged into the candidate
+    pool by score before fetching.
     """
     expand = _safe_expand(
         source_urls=source_urls,
         query=query,
         max_new_links=max_new_links,
+        boost_terms=boost_terms,
     )
     candidates = expand.get("candidates", [])
+    if extra_candidates:
+        # Merge sitemap-seeded URLs into the hyperlink candidates, best score
+        # first. Deduped by URL (hyperlinks win ties — they carry an anchor).
+        seen_cand = {c.get("url") for c in candidates}
+        merged = list(candidates)
+        for c in extra_candidates:
+            if isinstance(c, dict) and c.get("url") and c.get("url") not in seen_cand:
+                seen_cand.add(c.get("url"))
+                merged.append(c)
+        merged.sort(key=lambda c: c.get("score", 0), reverse=True)
+        candidates = merged
+    known_urls = {u for u in (baseline_urls or []) if u}
     fetched = []
     try:
         from selection import is_redundant, token_set
@@ -172,6 +208,8 @@ def _safe_expand_and_fetch(query, source_urls, max_new_links=20, max_chars=5000,
         url = c.get("url")
         if not url:
             continue
+        if url in known_urls:
+            continue  # already in Level-1 evidence — never re-fetch
         try:
             page = visit_website_enhanced(url)
         except Exception:
@@ -358,16 +396,75 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
     # Only alive pages are real evidence — dead/blocked pages must not reach the LLM
     pages = [p for p in pages if p.get("alive")]
 
-    top_alive = [p["url"] for p in pages if p.get("alive")][:20]
+    # Best-first Level-2 sources (Crawl4AI BestFirstCrawlingStrategy-inspired):
+    # alive pages ranked by backend relevance blended with the cross-variant RRF
+    # signal, so expansion walks the most promising sites first instead of
+    # discovery order.
+    try:
+        from selection import combine_score
+
+        pages.sort(
+            key=lambda p: combine_score(
+                float(p.get("relevance") or 0.0), float(p.get("rrf_norm") or 0.0)
+            ),
+            reverse=True,
+        )
+    except Exception:
+        pages.sort(key=lambda p: float(p.get("relevance") or 0.0), reverse=True)
+
+    top_alive = [p["url"] for p in pages][:20]
     need_expand = alive_count < 15 or not _is_coverage_sufficient(pages, query)
     expand_items = []
+    seeded_pool = []
+    aspects_uncovered = []
     if need_expand and top_alive:
+        # Uncovered facets (Crawl4AI AdaptiveCrawler-inspired aspect tracking):
+        # aspect-labelled variants whose facet got zero Level-1 evidence steer
+        # Level-2 candidate ordering via boost_terms.
+        boost_terms = []
+        try:
+            from _coverage import aspect_boost_terms, uncovered_aspects
+
+            aspects_uncovered = uncovered_aspects(pages, variants)
+            boost_terms = aspect_boost_terms(variants, aspects_uncovered)
+        except Exception:
+            aspects_uncovered, boost_terms = [], []
+
+        # Sitemap seeding (Crawl4AI AsyncUrlSeeder-inspired): ask the Level-1
+        # sites themselves for their URL lists (robots.txt -> sitemap), rank
+        # them against the query, and merge the best ones into the Level-2
+        # candidate pool. Fail-open: any error -> hyperlink expansion only.
+        try:
+            from sitemap_seeding import seed_urls_for_query
+
+            seeded_raw = seed_urls_for_query(query, top_alive)
+            # Score seeded URLs on the same scale as hyperlink candidates
+            # (anchor term hits, usually 0..~14): the top BM25 sitemap match
+            # scores like a strong anchor hit; the tail decays toward the
+            # noise floor. Weak matches do not crowd out anchor-matched links.
+            seeded_pool = []
+            n = max(1, len(seeded_raw))
+            for i, (u, d) in enumerate(seeded_raw[:12]):
+                if u in seen_page:
+                    continue
+                seeded_pool.append({
+                    "url": u,
+                    "anchor": "",
+                    "source_title": d,
+                    "score": 12 - int(9 * i / n),  # 12 down to ~3
+                })
+        except Exception:
+            seeded_pool = []
+
         expand_out = _safe_expand_and_fetch(
             query=query,
             source_urls=top_alive,
             max_new_links=max_new_links,
             max_chars=max_chars,
             baseline_texts=[p.get("text") or p.get("snippet") or "" for p in pages],
+            baseline_urls=seen_page,
+            boost_terms=boost_terms,
+            extra_candidates=seeded_pool,
         )
         for item in expand_out.get("items", []):
             u = item.get("url")
@@ -469,6 +566,8 @@ def _safe_deep_research(query, max_validate=200, max_new_links=20, max_chars=500
             "alive": alive_count,
             "level1": len(pages),
             "level2": len(expand_items),
+            "level2_seeded": len(seeded_pool),
+            "aspects_uncovered": aspects_uncovered,
             "images": len(images),
             "level1_time": level1_time,
         },
