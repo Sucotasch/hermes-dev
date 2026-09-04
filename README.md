@@ -24,7 +24,7 @@ The pipeline can be used as a seamlessly integrated plugin for the Hermes Agent 
 - **Full-Size Image Discovery**: Imagus sieve rules ported to Python (`sieve.py`) — regex `img`→`to` substitutions, `#ext#` variant expansion, WordPress size-suffix stripping; budgeted thumbnail→original resolution (`discovery.py`) for visual queries; two-phase image filtering (direct download + proxy retry) with format/hash/size checks and progress logging.
 - **Quality Evidence Selection**: RRF fusion of multi-variant results, title-normalized dedup, MMR diversification (aspect-aware), saturation-based expansion stop, BM25-ranked evidence chunk selection, optional cross-encoder reranking (`DDG_RERANK=1`).
 - **Clean Content Extraction**: Trafilatura main-content extraction (guarded, legacy fallback) plus readability-style cleaning of nav/footer/boilerplate.
-- **No-LLM Standalone Mode**: the standalone pipeline runs fully without an LLM server — set the query type manually (`--query-type` / GUI dropdown) and the report is built without the synthesis section (honest note instead of an error). LLM availability is probed once with a 15s bound.
+- **No-LLM Standalone Mode**: `--no-llm` (CLI) / *No LLM checkbox* (GUI) runs the standalone pipeline with zero LLM requests — the report is built from the gathered evidence only (honest "synthesis skipped" note instead of a summary section). A manual query type (`--query-type` / GUI dropdown) skips just the classification call; enrichment/synthesis stay on with patient timeouts for slow-loading local servers.
 - **Agent-Side Synthesis**: raw JSON evidence packs for the agent, or local-LLM synthesis into cited Markdown reports.
 
 ---
@@ -130,15 +130,15 @@ python standalone/deep_research.py "Recent advances in solid-state batteries"
 python standalone/deep_research.py "Compare Vaillant boiler F28 vs F29 error codes" --server http://127.0.0.1:11434
 python standalone/deep_research.py "History of Byzantine architecture" --validate 100 --output my_report.md
 python standalone/deep_research.py "NVIDIA RTX 5090 specs" --quiet
-# No LLM server? Set the type yourself, get the report without synthesis:
-python standalone/deep_research.py "best desktop wallpaper sites" --qtype visual --server http://127.0.0.1:1
+# No LLM server at all? Zero LLM requests, report without synthesis:
+python standalone/deep_research.py "best desktop wallpaper sites" --no-llm --qtype visual
 ```
 
 ### 2. Standalone GUI
 ```bash
 python standalone/gui.py     # or double-click gui_launcher.bat
 ```
-Features: LLM endpoint test (auto-discovers `/v1/models` or `/api/tags`), parameter presets (Minimal / Balanced / Visual / Maximum), proxy toggle, real-time progress with stage mapping, file logging, and the Hermes **"Check & Restore"** button.
+Features: LLM endpoint test (auto-discovers `/v1/models` or `/api/tags`), parameter presets (Minimal / Balanced / Visual / Maximum), proxy toggle, query-type dropdown, **No LLM** checkbox (zero LLM requests), real-time progress with stage mapping, file logging, and the Hermes **"Check & Restore"** button.
 
 ### 3. Native Python API
 ```python

@@ -65,8 +65,13 @@ Examples:
                         help="Set query intent manually, skipping LLM classification: "
                              "person, visual, technical, news, historical, comparison, "
                              "fact, art, education, science, video, general. "
-                             "With no LLM server the pipeline runs fully: report is built "
-                             "without the synthesis section (no error).")
+                             "Skips ONE call only — enrich/synthesis still use the LLM.")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="Run with zero LLM requests (no classification, no "
+                             "enrichment, no synthesis). Report is built without "
+                             "the synthesis section (honest note, no error). "
+                             "Combine with --qtype to pick the pipeline type; "
+                             "without it the run defaults to 'general'.")
     parser.add_argument("--validate", type=int, default=50,
                         help="Max URLs to validate (default: 50)")
     parser.add_argument("--proxy", action="store_true",
@@ -86,8 +91,16 @@ Examples:
     if not args.quiet:
         print("=" * 60)
         print(f"Deep Research: {args.query}")
-        print(f"Server: {args.server}"
-              + (f" (query_type={args.query_type})" if args.query_type else ""))
+        mode = []
+        if args.no_llm:
+            mode.append("no-LLM")
+        if args.query_type:
+            mode.append(f"query_type={args.query_type}")
+        if mode:
+            print(f"Server: {args.server} ({', '.join(mode)})" if not args.no_llm
+                  else f"Mode: {', '.join(mode)} — no LLM requests will be made")
+        else:
+            print(f"Server: {args.server}")
         print("=" * 60)
 
     # Run pipeline. Progress goes through a console-safe logger (cp1251
@@ -100,6 +113,7 @@ Examples:
         verbose=False,
         log=None if args.quiet else (lambda msg: print("  " + _console_safe(msg), flush=True)),
         query_type=args.query_type,
+        no_llm=args.no_llm,
         proxy_enabled=args.proxy,
         proxy_url=args.proxy_url,
     )

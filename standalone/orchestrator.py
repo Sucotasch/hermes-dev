@@ -30,32 +30,6 @@ except Exception:
         return False
 
 
-# ── LLM availability probe (no-LLM mode support) ────────────────────────────
-def _llm_probe(server_url, model="local", timeout=15):
-    """One bounded check whether the LLM server is usable.
-
-    Keeps the no-LLM mode from paying the full 120s chat timeout three
-    times (classify/enrich/synthesis): one 15s probe answers it. Never
-    raises; False just means "skip LLM steps, report without synthesis".
-    Mirrors llm_client.chat_completion's endpoint with a 1-token payload.
-    """
-    try:
-        import json as _json
-        import urllib.request as _ur
-        payload = _json.dumps({
-            "model": model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }).encode("utf-8")
-        req = _ur.Request(f"{server_url.rstrip('/')}/v1/chat/completions",
-                          data=payload, headers={"Content-Type": "application/json"})
-        with _ur.urlopen(req, timeout=timeout) as resp:
-            resp.read(64)
-        return True
-    except Exception:
-        return False
-
-
 # ── Readability-style content extractor ──────────────────────────────────────
 def _extract_main_content(html):
     """Extract main article content from HTML, removing nav/sidebar/footer/ads.
@@ -1178,7 +1152,7 @@ def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=100, verbose=True, log=None, model="local",
                       proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
                       top_n=30, images_count=30, llm_sources=20, max_variants=6, max_imgs_per_page=5,
-                      search_count=100, query_type=None):
+                      search_count=100, query_type=None, no_llm=False):
     """Execute full deep research pipeline.
 
     Args:
@@ -1188,10 +1162,13 @@ def run_deep_research(query, server_url="http://localhost:8888",
         proxy_enabled: enable proxy for blocked/dead URLs.
         proxy_url: HTTP proxy URL (default: NECOBOX 127.0.0.1:2080).
         query_type: optional user-set intent ("visual", "person", ...) — skips
-             LLM classification entirely. None (default) = LLM classifies.
-             In both cases the LLM server may be absent: classification then
-             falls back to "general", and synthesis/enrich are skipped with an
-             honest note in the report instead of failing.
+             LLM classification. None (default) = LLM classifies (or "general"
+             on failure).
+        no_llm: explicit no-LLM mode — zero LLM requests are made (no probe,
+             no classify, no enrich, no synthesis). The report carries an
+             honest "synthesis skipped" note. Local servers can take 30-90s
+             to load the model on first request, so auto-detecting "dead"
+             from one early failure would misfire: no-LLM is opt-in only.
     """
     # Apply proxy settings to both backend modules
     ddg_search.USE_PROXY = proxy_enabled
@@ -1206,14 +1183,26 @@ def run_deep_research(query, server_url="http://localhost:8888",
     start_total = time.time()
 
     # Step 1: Classify
-    # User-set query_type skips the LLM call entirely (and works with no
-    # LLM server at all). Otherwise the LLM classifies; on failure the
-    # backend default is "general" — this is also our no-LLM probe: one
-    # bounded attempt tells us whether synthesis later has any chance.
+    # Three modes, explicit by design:
+    #   1. no_llm=True        — zero LLM requests anywhere in the run.
+    #   2. user-set query_type — classification skipped, but enrich/synthesis
+    #                            still attempted patiently (120s each): the
+    #                            user may set the type only to skip one call,
+    #                            not to disable the LLM.
+    #   3. auto (default)      — LLM classifies; failure falls back to
+    #                            "general" (fail-open, as before). A local
+    #                            server still loading its model gets the full
+    #                            timeout to answer, not a quick probe.
     user_qtype = (query_type or "").strip().lower() if isinstance(query_type, str) else None
-    if user_qtype in _VALID_QUERY_TYPES:
+    if no_llm:
+        query_type = user_qtype if user_qtype in _VALID_QUERY_TYPES else "general"
+        if not user_qtype:
+            log("No-LLM mode: query type not set — defaulting to 'general' "
+                "(set it explicitly for visual/person pipelines)")
+        timings["classify"] = 0.0
+        log(f"  query_type: {query_type} (no-LLM mode)")
+    elif user_qtype in _VALID_QUERY_TYPES:
         query_type = user_qtype
-        llm_ok = _llm_probe(server_url, model=model)
         timings["classify"] = 0.0
         log(f"  query_type: {query_type} (user-set)")
     else:
@@ -1223,21 +1212,27 @@ def run_deep_research(query, server_url="http://localhost:8888",
         t = time.time()
         query_type = classify_query_type(query, server_url, model=model)
         timings["classify"] = round(time.time() - t, 1)
-        # classify returns "general" both as a real verdict and on failure —
-        # probe once to know which one it was (15s bound, one attempt).
-        llm_ok = _llm_probe(server_url, model=model) if query_type == "general" else True
-        log(f"  query_type: {query_type} ({timings['classify']}s){'' if llm_ok else ' — no LLM server, synthesis will be skipped'}")
+        log(f"  query_type: {query_type} ({timings['classify']}s)")
 
     # For visual queries: no image limit (user wants all relevant images);
     # raise the per-page cap too so galleries yield their full image set.
+    # Any per-page cap below 30 (untouched default 5, or preset values like
+    # Minimal's 3 / Visual's 10) silently fought the visual intent before —
+    # 0 (=all) is the only user cap that survives.
     if query_type == "visual":
-        images_count = 0
-        if max_imgs_per_page == 5:  # untouched default → raise for visual
+        overridden = []
+        if images_count != 0:
+            overridden.append(f"images_count {images_count}->0 (all)")
+            images_count = 0
+        if 0 < max_imgs_per_page < 30:
+            overridden.append(f"max_imgs_per_page {max_imgs_per_page}->30")
             max_imgs_per_page = 30
+        log("Visual pipeline: image budgets raised for gallery harvesting"
+            + (f" [{'; '.join(overridden)}]" if overridden else ""))
 
     # Step 1b: Enrich query with aliases (for person queries; needs LLM)
     enriched_query = query
-    if query_type == "person" and llm_ok:
+    if query_type == "person" and not no_llm:
         log("Enriching query with aliases...")
         t = time.time()
         enriched_query = enrich_query(query, query_type, server_url, model=model)
@@ -1246,8 +1241,6 @@ def run_deep_research(query, server_url="http://localhost:8888",
             log(f"  enriched: {enriched_query[:80]} ({timings['enrich']}s)")
         else:
             log(f"  no additional aliases found ({timings['enrich']}s)")
-    elif query_type == "person" and not llm_ok:
-        log("Alias enrichment skipped (no LLM server)")
 
     # Step 2: Multi-query search
     log("Searching...")
@@ -1370,6 +1363,15 @@ def run_deep_research(query, server_url="http://localhost:8888",
                    reverse=True)
 
     # Step 6: Level 2 expansion
+    # Two sources of candidates, sitemaps first (Tier-1 Crawl4AI idea):
+    #   1. Sitemap seeding — sitemap URLs from the alive domains, BM25-ranked
+    #      against the query (seed_urls_for_query). A site's sitemap is the
+    #      site itself telling us what matters; hyperlinks only tell us what
+    #      the page we happened to fetch links to.
+    #   2. Hyperlink walk of top alive pages (the original L2).
+    # Sitemap seeds are merged into the same validated-pool pipeline with
+    # the same dedup-key caps. Fail-open: seeding errors yield [] and the
+    # hyperlink walk proceeds as before.
     level2_count = 0
     if alive_count < 20:
         log("Level 2 expansion...")
@@ -1383,6 +1385,31 @@ def run_deep_research(query, server_url="http://localhost:8888",
             key = _dedup_key(p.get("url", ""))
             key_counts[key] = key_counts.get(key, 0) + 1
         level2_urls = []
+        seeded_count = 0
+        # 1) Sitemap seeding (best-first; bounded by the module's own
+        #    per-domain/overall time budgets). Cap at 20 so the proven
+        #    hyperlink walk keeps ~half the [:30] validation budget.
+        #    Seeds share the per-domain dedup-key cap (2 per key) with
+        #    hyperlink candidates: one sitemap-rich host must not eat the
+        #    whole seed budget either.
+        try:
+            from sitemap_seeding import seed_urls_for_query
+            seeds = seed_urls_for_query(query, top_urls, max_urls=20)
+            for href, _seed_domain in seeds:
+                if not href or href in seen_urls or ddg_search.is_blocked_domain(href):
+                    continue
+                key = _dedup_key(href)
+                if key_counts.get(key, 0) >= 2:
+                    continue
+                key_counts[key] = key_counts.get(key, 0) + 1
+                seen_urls.add(href)
+                level2_urls.append({"url": href, "title": "", "snippet": ""})
+                seeded_count += 1
+        except Exception:
+            pass  # fail-open: no seeding, hyperlink walk only
+        if seeded_count:
+            log(f"  sitemap seeding: {seeded_count} candidate URLs")
+        # 2) Hyperlink walk of top pages (fills the rest of the budget)
         # Per-URL hard cap for expansion fetches: the inner chain
         # (direct -> Jina -> Wayback) has its own timeouts, but a hung
         # connection can still stall the whole L2 loop for minutes.
@@ -1456,7 +1483,10 @@ def run_deep_research(query, server_url="http://localhost:8888",
                     seen_urls.add(href)
                     level2_urls.append({"url": href, "title": link.get("text", ""), "snippet": ""})
         if level2_urls:
-            log(f"  {len(level2_urls)} candidates")
+            log(f"  {len(level2_urls)} candidates"
+                + (f" ({seeded_count} sitemap-seeded)" if seeded_count else ""))
+            # Seeds go first in level2_urls, so [:30] keeps them ahead of
+            # hyperlink candidates when the list exceeds the L2 budget.
             l2_val, l2_alive = _validate_urls(level2_urls[:30], 30, verbose, log, query_type=query_type, query=query)
             # Relevance gate + domain dedup (platform-aware)
             domain_counts = {}
@@ -1619,7 +1649,11 @@ def run_deep_research(query, server_url="http://localhost:8888",
     # summary section. Never a hard error.
     evidence.sort(key=lambda x: x.get("relevance", 0), reverse=True)
     synthesis = None
-    if llm_ok:
+    if no_llm:
+        timings["synthesis"] = 0.0
+        log("Synthesis skipped (no-LLM mode) — report without summary section")
+        synthesis = "_LLM synthesis skipped (no-LLM mode)._\n"
+    else:
         log("Synthesizing conclusions...")
         t = time.time()
 
@@ -1651,10 +1685,11 @@ CRITICAL RULES:
 
         timings["synthesis"] = round(time.time() - t, 1)
         log(f"  Done ({timings['synthesis']}s)")
-    else:
-        timings["synthesis"] = 0.0
-        log(f"Synthesis skipped (no LLM server at {server_url}) — report without summary section")
-        synthesis = f"_LLM synthesis skipped — no LLM server reachable at {server_url}._\n"
+        if synthesis is None:
+            # The call failed (server absent/dead) — say so honestly instead
+            # of the old misleading "_No synthesis available_".
+            synthesis = f"_LLM synthesis failed — no answer from {server_url} within the timeout._\n"
+            log(f"  LLM did not answer ({timings['synthesis']}s wait) — report without summary section")
 
     # Step 11: Build final report (articles + images + synthesis)
     log("Building report...")
@@ -1669,7 +1704,7 @@ CRITICAL RULES:
         "stats": {
             "query": query,
             "query_type": query_type,
-            "llm": llm_ok,
+            "llm": bool(synthesis is not None and not synthesis.startswith("_LLM synthesis")),
             "raw_urls": len(all_results),
             "alive": alive_count,
             "level2": level2_count,

@@ -268,7 +268,7 @@ class ResearchThread(QThread):
     def __init__(self, query, server_url, max_validate, output_dir, model="local",
                  proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
                  top_n=30, images_count=30, llm_sources=20, max_variants=6, max_imgs_per_page=5,
-                 search_count=100, query_type=None):
+                 search_count=100, query_type=None, no_llm=False):
         super().__init__()
         self.query = query
         self.server_url = server_url
@@ -284,6 +284,7 @@ class ResearchThread(QThread):
         self.max_imgs_per_page = max_imgs_per_page
         self.search_count = search_count
         self.query_type = query_type
+        self.no_llm = no_llm
         self._cancelled = False
 
     def run(self):
@@ -314,6 +315,7 @@ class ResearchThread(QThread):
                 max_imgs_per_page=self.max_imgs_per_page,
                 search_count=self.search_count,
                 query_type=self.query_type,
+                no_llm=self.no_llm,
             )
 
             if self._cancelled:
@@ -529,10 +531,19 @@ class HermesGUI(QMainWindow):
              "science", "video"])
         self.cmb_query_type.setToolTip(
             "Query intent. Auto = LLM classifies (needs an LLM server).\n"
-            "A fixed type skips classification and works with no LLM:\n"
-            "the report is then built without the synthesis section.")
+            "A fixed type skips ONLY the classification call;\n"
+            "enrich/synthesis still use the LLM.")
         self.cmb_query_type.setMaximumWidth(110)
         s_lay.addWidget(self.cmb_query_type)
+
+        self.chk_no_llm = QCheckBox("No LLM")
+        self.chk_no_llm.setToolTip(
+            "Zero LLM requests: no classification, no enrichment, no synthesis.\n"
+            "The report is built from the gathered evidence only (honest note\n"
+            "instead of the summary section). Pair with a fixed query type;\n"
+            "with 'Auto' the run falls back to 'general'.")
+        self.chk_no_llm.toggled.connect(self._on_no_llm_changed)
+        s_lay.addWidget(self.chk_no_llm)
 
         self.txt_query = QLineEdit()
         self.txt_query.setPlaceholderText("Enter research query...")
@@ -731,13 +742,31 @@ class HermesGUI(QMainWindow):
         else:
             self.lbl_hermes_status.setStyleSheet("color: red;")
 
+    def _on_no_llm_changed(self, checked):
+        """No-LLM mode: no server URL is required, Auto falls back to 'general'."""
+        if checked:
+            self.cmb_query_type.setToolTip(
+                "Query intent. No-LLM mode is ON: zero LLM requests.\n"
+                "'Auto' (no type set) falls back to 'general' — pick a type\n"
+                "explicitly for visual/person/etc. pipelines.")
+            if self.cmb_query_type.currentText() == "Auto":
+                self._log_to_gui("No-LLM mode: query type 'Auto' will default to 'general' "
+                                  "(set the dropdown explicitly for visual/person pipelines)")
+        else:
+            self.cmb_query_type.setToolTip(
+                "Query intent. Auto = LLM classifies (needs an LLM server).\n"
+                "A fixed type skips ONLY the classification call;\n"
+                "enrich/synthesis still use the LLM.")
+
     def _on_research(self):
         query = self.txt_query.text().strip()
         if not query:
             return
         server = self.txt_server.text().strip()
-        if not server:
-            QMessageBox.warning(self, "Missing URL", "Enter LLM server URL.")
+        no_llm = self.chk_no_llm.isChecked()
+        if not server and not no_llm:
+            QMessageBox.warning(self, "Missing URL", "Enter LLM server URL "
+                                "(or enable 'No LLM' to run without one).")
             return
 
         self.btn_research.setEnabled(False)
@@ -751,7 +780,8 @@ class HermesGUI(QMainWindow):
         proxy_enabled = self.chk_proxy.isChecked()
         proxy_url = self.txt_proxy.text().strip() or "http://127.0.0.1:2080"
         # "Auto" → None → LLM classifies (or "general" fallback when the
-        # LLM server is absent — the pipeline runs either way).
+        # LLM server is absent — the pipeline runs either way). No-LLM
+        # checkbox overrides everything: zero LLM requests this run.
         qtype_choice = self.cmb_query_type.currentText()
         query_type = None if qtype_choice == "Auto" else qtype_choice
         self._research_thread = ResearchThread(
@@ -769,6 +799,7 @@ class HermesGUI(QMainWindow):
             max_imgs_per_page=self.spin_max_imgs.value(),
             search_count=self.spin_search_count.value(),
             query_type=query_type,
+            no_llm=no_llm,
         )
         self._research_thread.progress.connect(self._on_progress)
         self._research_thread.log_line.connect(self._on_log_line)

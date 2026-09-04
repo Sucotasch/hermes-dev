@@ -26,30 +26,44 @@ python deep_research.py "query" --output my_report.md
 # Quiet mode (no progress output)
 python deep_research.py "query" --quiet
 
-# Set query intent manually (skips LLM classification)
+# Set query intent manually (skips the classification call ONLY —
+# enrichment and synthesis still use the LLM, patiently)
 python deep_research.py "query" --query-type visual
 python deep_research.py "query" --qtype technical
+
+# Fully offline: zero LLM requests (no classification, no enrichment,
+# no synthesis). Pair with a type; without one it defaults to 'general'.
+python deep_research.py "query" --no-llm --qtype visual
+
+# Proxy retry for blocked/dead URLs (NECOBOX), same as the GUI checkbox
+python deep_research.py "query" --proxy --proxy-url http://127.0.0.1:2080
 ```
 
-## No-LLM mode
+## No-LLM mode (explicit opt-in)
 
 The LLM plays a small role: classify the query intent at the start and synthesize
-a summary at the end. Both steps are optional — **the pipeline runs fully without
-an LLM server**:
+a summary at the end. Both steps can be skipped — **the pipeline runs fully
+without an LLM server**:
 
-- `--query-type <type>` (CLI) or the *type dropdown* (GUI) sets the intent manually —
-  no classification request is made. Types: `person, visual, technical, news,
-  historical, comparison, fact, art, education, science, video, general`.
-- Without an LLM the report is built **without the synthesis section** —
-  all articles, images and metadata are still there. The report carries an
-  explicit note (`_LLM synthesis skipped — no LLM server reachable at …_`)
-  instead of failing.
-- LLM availability is probed once with a **15s bound** (not the 120s chat
-  timeout), so a dead or hanging server costs seconds, not minutes.
-- `stats["llm"]` in the result dict tells you which mode ran (`true`/`false`).
+- `--no-llm` (CLI) or the *No LLM checkbox* (GUI): **zero** LLM requests are
+  made — no classification, no enrichment, no synthesis. The report carries an
+  explicit note (`_LLM synthesis skipped (no-LLM mode)._`) instead of a summary
+  section; `stats["llm"]` is `false`.
+- `--query-type <type>` (CLI) or the *type dropdown* (GUI) sets the intent
+  manually — this skips **only the classification call**. Enrichment (person
+  queries) and synthesis are still attempted with the full patient timeout
+  (local servers can take 30–90s to load the model on the first request —
+  the pipeline never decides early that the LLM is "dead"). Types: `person,
+  visual, technical, news, historical, comparison, fact, art, education,
+  science, video, general`.
+- `--no-llm` without a type defaults to `general` **with a warning line in
+  the log** (visual/person pipelines differ meaningfully — pick the type).
+- With Auto type and a dead server, classification fails open to `general`
+  and synthesis gets an honest "failed" note; the pipeline never crashes.
 
-Default behavior is unchanged: with no `--query-type` and a live server, the LLM
-classifies (fallback `general` on any failure) and synthesizes as before.
+Why explicit opt-in (design note): an early one-shot "LLM dead?" probe was
+tried and removed — it misfired on local servers that were still loading
+the model, silently degrading reports that could have had a synthesis.
 
 ## Architecture
 
@@ -75,7 +89,9 @@ llm_client.py       llama.cpp HTTP client
 5. URL validation (HEAD-first, then GET)
 6. Domain quarantine (403 → skip, 503 → defer)
 7. Content relevance scoring
-8. Level 2 expansion (if alive < 15)
+8. Level 2 expansion (if alive < 20): sitemap seeding (BM25-ranked URLs
+   from the alive domains' sitemaps) + hyperlink walk, shared per-domain caps
 9. Deep-read with platform-aware dedup
-10. Evidence selection; LLM synthesis (skipped, with a note, when no LLM)
+10. Evidence selection; LLM synthesis (skipped with an honest note in
+    `--no-llm` mode; attempted patiently otherwise)
 11. Report saved as .md file
