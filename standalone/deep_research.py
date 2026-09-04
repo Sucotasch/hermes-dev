@@ -43,6 +43,13 @@ Examples:
                         help="LLM server URL (OpenAI-compatible, default: http://localhost:8888)")
     parser.add_argument("--model", default="local",
                         help="Model name to use (default: local; for Ollama use e.g. ministral-3:14b)")
+    parser.add_argument("--query-type", "--qtype", dest="query_type", default=None,
+                        metavar="TYPE",
+                        help="Set query intent manually, skipping LLM classification: "
+                             "person, visual, technical, news, historical, comparison, "
+                             "fact, art, education, science, video, general. "
+                             "With no LLM server the pipeline runs fully: report is built "
+                             "without the synthesis section (no error).")
     parser.add_argument("--validate", type=int, default=50,
                         help="Max URLs to validate (default: 50)")
     parser.add_argument("--output", "-o", default=None,
@@ -56,7 +63,8 @@ Examples:
     if not args.quiet:
         print("=" * 60)
         print(f"Deep Research: {args.query}")
-        print(f"Server: {args.server}")
+        print(f"Server: {args.server}"
+              + (f" (query_type={args.query_type})" if args.query_type else ""))
         print("=" * 60)
 
     # Run pipeline
@@ -66,6 +74,7 @@ Examples:
         model=args.model,
         max_validate=args.validate,
         verbose=not args.quiet,
+        query_type=args.query_type,
     )
 
     # Output report

@@ -10,14 +10,21 @@ The pipeline can be used as a seamlessly integrated plugin for the Hermes Agent 
 
 - **Zero-Dependency Multi-Engine Search**: DuckDuckGo, Yahoo, Yandex, Mojeek — no paid API keys.
 - **Intent-Aware Query Variants**: LLM classifies intent (visual/technical/news/person/...), then generates aspect-tagged variants. A result-driven refinement hook (`_suggest_query_variants`) re-searches underrepresented facets when the initial pool is thin.
+- **Sitemap URL Seeding** (Crawl4AI-inspired, `sitemap_seeding.py`): before hyperlink expansion, the Level-2 pool is seeded from the sites themselves — robots.txt → sitemap (gzip-aware, bomb-guarded) → junk-filter → BM25 ranking against the query. Bounded (≤4 domains, ≤6s/domain), fail-open, no new dependencies.
+- **Best-First Level-2 Expansion** (Crawl4AI-inspired): expansion candidates are scored *before* fetching (anchor-term hits ×2, URL hits ×1, uncovered-aspect boosts); sources are walked relevance+RRF-first; already-known URLs are skipped pre-fetch so the fetch budget goes to new pages only.
+- **Aspect-Coverage Tracking**: variants whose facet produced zero alive evidence surface as `aspects_uncovered` in the panel and steer Level-2 ordering via boost terms.
 - **Two-Level Fetching**:
   - *Level 1*: wide search pool, HEAD-first validation, liveness checks, relevance scoring, domain quarantine (403 → block, 503 → defer and retry).
-  - *Level 2*: expansion visits live pages and harvests secondary hyperlinks when coverage is low.
+  - *Level 2*: expansion visits live pages and harvests secondary hyperlinks when coverage is low; sitemap-seeded URLs compete with hyperlink candidates on the same score scale.
+- **PDF Text Extraction**: PDF URLs (`.pdf`, arxiv `/pdf/`) are extracted via `pypdf` on the first request (4MB/30-page bounds, fail-open to the HTML fetch ladder) — `source:"pdf"`.
+- **Table Harvesting**: comparison/spec tables are extracted by a second bounded trafilatura pass (`include_tables=True`) into a separate `tables` field — previously discarded entirely.
+- **Head Metadata**: meta description / og:description / article:published_time from the already-fetched HTML — a cheap relevance signal (`description` field) plus a `published` backfill when htmldate is missing.
 - **Crawl-Layer Filtering (ported from web-media-parser)**: segment-aware skip of legal/account/noise URLs before validation, ad/tracker URL classification with allowlist, SEO keyword-soup spam detection, platform-aware dedup (blogspot/livejournal use path-based keys), mirror-domain collapsing.
 - **Anti-Bot & Access Bypass**: `curl_cffi` impersonation, `httpx` fallback, Jina reader with CAPTCHA/challenge detection, DNS circuit breaker, proxy retry, consent/age cookie pre-set.
 - **Full-Size Image Discovery**: Imagus sieve rules ported to Python (`sieve.py`) — regex `img`→`to` substitutions, `#ext#` variant expansion, WordPress size-suffix stripping; budgeted thumbnail→original resolution (`discovery.py`) for visual queries; two-phase image filtering (direct download + proxy retry) with format/hash/size checks and progress logging.
 - **Quality Evidence Selection**: RRF fusion of multi-variant results, title-normalized dedup, MMR diversification (aspect-aware), saturation-based expansion stop, BM25-ranked evidence chunk selection, optional cross-encoder reranking (`DDG_RERANK=1`).
 - **Clean Content Extraction**: Trafilatura main-content extraction (guarded, legacy fallback) plus readability-style cleaning of nav/footer/boilerplate.
+- **No-LLM Standalone Mode**: the standalone pipeline runs fully without an LLM server — set the query type manually (`--query-type` / GUI dropdown) and the report is built without the synthesis section (honest note instead of an error). LLM availability is probed once with a 15s bound.
 - **Agent-Side Synthesis**: raw JSON evidence packs for the agent, or local-LLM synthesis into cited Markdown reports.
 
 ---
@@ -47,8 +54,9 @@ A unified backend (`plugins/web-tools/ddg/`) is driven by three modes:
 | --- | --- |
 | `hermes-agent/tools/ddg_search_tool.py` | Hermes wrapper; registers 5 tools (`web_search_deep`, `web_expand_and_fetch`, `visit_website_tool`, `image_search`, `web_deep_research`), RRF/MMR selection. |
 | `plugins/web-tools/ddg/ddg_search.py` | Search backend: multi-engine routing, validation, blocklists, fullsize extraction. |
-| `plugins/web-tools/ddg/visit_website_enhanced.py` | Smart fetcher (`curl_cffi`/`httpx`/Jina) + Trafilatura content extraction. |
+| `plugins/web-tools/ddg/visit_website_enhanced.py` | Smart fetcher (`curl_cffi`/`httpx`/Jina) + Trafilatura content extraction + PDF fast path + tables + head metadata. |
 | `plugins/web-tools/ddg/query_variants.py` | Aspect-tagged variants + result-driven `_suggest_query_variants`. |
+| `plugins/web-tools/ddg/sitemap_seeding.py` | Bounded robots.txt → sitemap → BM25 URL seeding for Level-2 (gzip-aware, fail-open). |
 | `plugins/web-tools/ddg/selection.py` | Shared RRF fusion, title dedup, MMR diversification, saturation stop, cross-encoder hook. |
 | `plugins/web-tools/ddg/sieve.py` | Imagus sieve static engine (fullsize image rules, JS→Python callable converter). |
 | `plugins/web-tools/ddg/discovery.py` | Budgeted thumbnail→fullsize link resolution via sieve `link→url→res` chains. |
@@ -122,6 +130,8 @@ python standalone/deep_research.py "Recent advances in solid-state batteries"
 python standalone/deep_research.py "Compare Vaillant boiler F28 vs F29 error codes" --server http://127.0.0.1:11434
 python standalone/deep_research.py "History of Byzantine architecture" --validate 100 --output my_report.md
 python standalone/deep_research.py "NVIDIA RTX 5090 specs" --quiet
+# No LLM server? Set the type yourself, get the report without synthesis:
+python standalone/deep_research.py "best desktop wallpaper sites" --qtype visual --server http://127.0.0.1:1
 ```
 
 ### 2. Standalone GUI

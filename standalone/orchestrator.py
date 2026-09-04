@@ -30,6 +30,32 @@ except Exception:
         return False
 
 
+# ── LLM availability probe (no-LLM mode support) ────────────────────────────
+def _llm_probe(server_url, model="local", timeout=15):
+    """One bounded check whether the LLM server is usable.
+
+    Keeps the no-LLM mode from paying the full 120s chat timeout three
+    times (classify/enrich/synthesis): one 15s probe answers it. Never
+    raises; False just means "skip LLM steps, report without synthesis".
+    Mirrors llm_client.chat_completion's endpoint with a 1-token payload.
+    """
+    try:
+        import json as _json
+        import urllib.request as _ur
+        payload = _json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }).encode("utf-8")
+        req = _ur.Request(f"{server_url.rstrip('/')}/v1/chat/completions",
+                          data=payload, headers={"Content-Type": "application/json"})
+        with _ur.urlopen(req, timeout=timeout) as resp:
+            resp.read(64)
+        return True
+    except Exception:
+        return False
+
+
 # ── Readability-style content extractor ──────────────────────────────────────
 def _extract_main_content(html):
     """Extract main article content from HTML, removing nav/sidebar/footer/ads.
@@ -1142,11 +1168,17 @@ def _filter_images_for_report(images, log=None):
     return filtered
 
 
+_VALID_QUERY_TYPES = (
+    "person", "visual", "technical", "news", "historical", "comparison",
+    "fact", "art", "education", "science", "video", "general",
+)
+
+
 def run_deep_research(query, server_url="http://localhost:8888",
                       max_validate=100, verbose=True, log=None, model="local",
                       proxy_enabled=False, proxy_url="http://127.0.0.1:2080",
                       top_n=30, images_count=30, llm_sources=20, max_variants=6, max_imgs_per_page=5,
-                      search_count=100):
+                      search_count=100, query_type=None):
     """Execute full deep research pipeline.
 
     Args:
@@ -1155,6 +1187,11 @@ def run_deep_research(query, server_url="http://localhost:8888",
         model: model name to send to LLM server (default: "local" for llama.cpp).
         proxy_enabled: enable proxy for blocked/dead URLs.
         proxy_url: HTTP proxy URL (default: NECOBOX 127.0.0.1:2080).
+        query_type: optional user-set intent ("visual", "person", ...) — skips
+             LLM classification entirely. None (default) = LLM classifies.
+             In both cases the LLM server may be absent: classification then
+             falls back to "general", and synthesis/enrich are skipped with an
+             honest note in the report instead of failing.
     """
     # Apply proxy settings to both backend modules
     ddg_search.USE_PROXY = proxy_enabled
@@ -1169,11 +1206,27 @@ def run_deep_research(query, server_url="http://localhost:8888",
     start_total = time.time()
 
     # Step 1: Classify
-    log("Classifying intent...")
-    t = time.time()
-    query_type = classify_query_type(query, server_url, model=model)
-    timings["classify"] = round(time.time() - t, 1)
-    log(f"  query_type: {query_type} ({timings['classify']}s)")
+    # User-set query_type skips the LLM call entirely (and works with no
+    # LLM server at all). Otherwise the LLM classifies; on failure the
+    # backend default is "general" — this is also our no-LLM probe: one
+    # bounded attempt tells us whether synthesis later has any chance.
+    user_qtype = (query_type or "").strip().lower() if isinstance(query_type, str) else None
+    if user_qtype in _VALID_QUERY_TYPES:
+        query_type = user_qtype
+        llm_ok = _llm_probe(server_url, model=model)
+        timings["classify"] = 0.0
+        log(f"  query_type: {query_type} (user-set)")
+    else:
+        if user_qtype:
+            log(f"  Unknown query_type '{user_qtype}' — falling back to LLM classification")
+        log("Classifying intent...")
+        t = time.time()
+        query_type = classify_query_type(query, server_url, model=model)
+        timings["classify"] = round(time.time() - t, 1)
+        # classify returns "general" both as a real verdict and on failure —
+        # probe once to know which one it was (15s bound, one attempt).
+        llm_ok = _llm_probe(server_url, model=model) if query_type == "general" else True
+        log(f"  query_type: {query_type} ({timings['classify']}s){'' if llm_ok else ' — no LLM server, synthesis will be skipped'}")
 
     # For visual queries: no image limit (user wants all relevant images);
     # raise the per-page cap too so galleries yield their full image set.
@@ -1182,9 +1235,9 @@ def run_deep_research(query, server_url="http://localhost:8888",
         if max_imgs_per_page == 5:  # untouched default → raise for visual
             max_imgs_per_page = 30
 
-    # Step 1b: Enrich query with aliases (for person queries)
+    # Step 1b: Enrich query with aliases (for person queries; needs LLM)
     enriched_query = query
-    if query_type == "person":
+    if query_type == "person" and llm_ok:
         log("Enriching query with aliases...")
         t = time.time()
         enriched_query = enrich_query(query, query_type, server_url, model=model)
@@ -1193,6 +1246,8 @@ def run_deep_research(query, server_url="http://localhost:8888",
             log(f"  enriched: {enriched_query[:80]} ({timings['enrich']}s)")
         else:
             log(f"  no additional aliases found ({timings['enrich']}s)")
+    elif query_type == "person" and not llm_ok:
+        log("Alias enrichment skipped (no LLM server)")
 
     # Step 2: Multi-query search
     log("Searching...")
@@ -1559,21 +1614,26 @@ def run_deep_research(query, server_url="http://localhost:8888",
                 log(f"    {s}")
 
     # Step 10: LLM synthesis (conclusions only, not full text)
+    # No-LLM mode: skip cleanly with an honest note — the report keeps all
+    # articles/images (the evidence itself is the value), we only lose the
+    # summary section. Never a hard error.
     evidence.sort(key=lambda x: x.get("relevance", 0), reverse=True)
-    log("Synthesizing conclusions...")
-    t = time.time()
+    synthesis = None
+    if llm_ok:
+        log("Synthesizing conclusions...")
+        t = time.time()
 
-    # Give LLM the evidence content for synthesis. Top-3 sources get the FULL
-    # BM25 chunk (4000 chars) — key numbers/facts usually live deeper than the
-    # first 1500 chars; the rest get the shorter preview to stay in context.
-    evidence_content = ""
-    for i, e in enumerate(evidence[:llm_sources]):
-        limit = 4000 if i < 3 else 1500
-        content_preview = e['content'][:limit] if e['content'] else ""
-        evidence_content += f"\n--- Source {i+1}: {e['title']} ---\n{content_preview}\n"
+        # Give LLM the evidence content for synthesis. Top-3 sources get the FULL
+        # BM25 chunk (4000 chars) — key numbers/facts usually live deeper than the
+        # first 1500 chars; the rest get the shorter preview to stay in context.
+        evidence_content = ""
+        for i, e in enumerate(evidence[:llm_sources]):
+            limit = 4000 if i < 3 else 1500
+            content_preview = e['content'][:limit] if e['content'] else ""
+            evidence_content += f"\n--- Source {i+1}: {e['title']} ---\n{content_preview}\n"
 
-    synthesis = chat_completion([
-        {"role": "system", "content": """You are a research analyst writing a synthesis for a deep research report.
+        synthesis = chat_completion([
+            {"role": "system", "content": """You are a research analyst writing a synthesis for a deep research report.
 
 The source articles above contain factual information about the topic. Extract and synthesize ALL relevant facts from the sources into:
 
@@ -1586,11 +1646,15 @@ CRITICAL RULES:
 - Use specific details: names, dates, film titles, career facts.
 - If a source contains biographical data, include it in the takeaways.
 - Only list gaps for information that truly cannot be found in ANY of the provided sources."""},
-        {"role": "user", "content": f"Research topic: {query}\nQuery type: {query_type}\n\nSources:\n{evidence_content}\n\nWrite the synthesis section."},
-    ], server_url=server_url, temperature=0.3, max_tokens=2000, model=model)
+            {"role": "user", "content": f"Research topic: {query}\nQuery type: {query_type}\n\nSources:\n{evidence_content}\n\nWrite the synthesis section."},
+        ], server_url=server_url, temperature=0.3, max_tokens=2000, model=model)
 
-    timings["synthesis"] = round(time.time() - t, 1)
-    log(f"  Done ({timings['synthesis']}s)")
+        timings["synthesis"] = round(time.time() - t, 1)
+        log(f"  Done ({timings['synthesis']}s)")
+    else:
+        timings["synthesis"] = 0.0
+        log(f"Synthesis skipped (no LLM server at {server_url}) — report without summary section")
+        synthesis = f"_LLM synthesis skipped — no LLM server reachable at {server_url}._\n"
 
     # Step 11: Build final report (articles + images + synthesis)
     log("Building report...")
@@ -1605,6 +1669,7 @@ CRITICAL RULES:
         "stats": {
             "query": query,
             "query_type": query_type,
+            "llm": llm_ok,
             "raw_urls": len(all_results),
             "alive": alive_count,
             "level2": level2_count,
