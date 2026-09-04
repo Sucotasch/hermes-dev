@@ -87,7 +87,10 @@ browser runtime (V8, DOM, CSS, network, storage) in ONE Rust binary (~97 MB),
 structure-first: layout/pixels are generated only on demand. Use via CLI
 (`moli fetch --dump markdown ...`), CDP, WebDriver Classic, or WebDriver BiDi.
 
-**Standout capabilities (verified on this machine, v1.1.1):**
+**Standout capabilities (verified on this machine, v1.1.1; binary updated
+to v1.1.2 on 2026-09-04 — DOM/CSS/CDP bugfixes + perf: V8 pointer compression,
+deferred response copies; `fetch --dump markdown` and `--dump semantic_tree_text`
+output formats re-verified unchanged, `mfetch` bridge path re-verified OK):**
 - Real V8 + network stack — executes **external** `<script src>`, so it renders
   SPAs (React/Vue/Next.js CSR sites that ship an empty `<div id="root">`) that
   our Deno happy-dom worker (inline JS only, sandboxed no-net) cannot extract.
