@@ -876,6 +876,7 @@ def _filter_images_light(images, log=None):
         "emoji", "emoji/", "tracking", "pixel", "1x1", "spacer",
         "social-share", "share-icon", "btn_", "button", "separator",
         "loading", "loader", "placeholder", "watermark", "banner-cta",
+        "symbol", "-mark.", "brand",
     )
     SKIP_EXTS = (".svg", ".ico", ".gif", ".bmp", ".cur", ".tiff", ".webp?")
     kept, dropped = [], 0
@@ -942,12 +943,46 @@ def _filter_images_for_report(images, log=None):
         url_lower = url.lower().split('?')[0]
         return any(url_lower.endswith(ext) for ext in SKIP_FORMATS)
 
-    def _try_download(url, proxy=None):
+    # Thread-local curl_cffi sessions for image downloads: bare httpx.get()
+    # opens a fresh TLS connection per image — under 5-worker contention the
+    # old 3s timeout quarantined ~43% of perfectly good images (i.pinimg.com
+    # etc). A keep-alive Chrome-impersonating session is ~8x faster (0.0-0.4s
+    # vs 0.7-2.8s per image), which shrinks quarantine and makes the phase-2
+    # proxy retry almost a no-op.
+    import threading as _img_threading
+    _img_sess_local = _img_threading.local()
+
+    def _get_img_session(proxy=None):
+        """Per-thread curl_cffi Session (direct key and one per proxy URL).
+        Returns None when curl_cffi is unavailable → httpx fallback."""
         try:
-            resp = httpx.get(url, timeout=3, follow_redirects=True, proxy=proxy)
+            import curl_cffi
+        except ImportError:
+            return None
+        cache = getattr(_img_sess_local, "cache", None)
+        if cache is None:
+            cache = _img_sess_local.cache = {}
+        key = proxy or "direct"
+        if key not in cache:
+            cache[key] = curl_cffi.requests.Session(impersonate="chrome")
+        return cache[key]
+
+    def _try_download(url, proxy=None):
+        sess = _get_img_session(proxy)
+        if sess is not None:
+            try:
+                r = sess.get(url, timeout=8, proxy=proxy)
+                if r.status_code == 200:
+                    return r.content
+            except Exception:
+                return None
+            return None
+        # Fallback: no curl_cffi in this interpreter → plain httpx
+        try:
+            resp = httpx.get(url, timeout=5, follow_redirects=True, proxy=proxy)
             if resp.status_code == 200:
                 return resp.content
-        except:
+        except Exception:
             pass
         return None
 
@@ -970,7 +1005,7 @@ def _filter_images_for_report(images, log=None):
         except:
             return None
 
-    with ThreadPoolExecutor(max_workers=5) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         results = []
         for i, r in enumerate(ex.map(_process_phase1, images), 1):
             results.append(r)
