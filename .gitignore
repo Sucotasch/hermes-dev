@@ -14,6 +14,9 @@ Temp/
 *.log
 *.json.tmp
 
+# Git commit-message temp files (used instead of inline -m quoting traps)
+COMMIT_MSG_TMP*
+
 # Deno JS engine (vendored binary ~127 MB + npm cache ~4781 files)
 # Copy from web-media-parser dist/WebMediaParser/bin/ to deno/ :
 #   Copy-Item "$srcBin\deno.exe" "deno\deno.exe"

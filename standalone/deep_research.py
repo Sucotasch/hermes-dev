@@ -19,6 +19,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orchestrator import run_deep_research
 
 
+def _console_safe(text):
+    """Sanitize progress lines for the console's code page.
+
+    The pipeline log uses arrows and other non-ASCII glyphs; on a cp1251
+    console (default Windows) printing them raises UnicodeEncodeError and
+    kills an otherwise healthy run. Encode to the stream's code page with
+    replacement instead — progress stays readable, the run survives.
+    """
+    try:
+        enc = (sys.stdout.encoding or "utf-8").lower()
+        if "utf" in enc:
+            return text
+        return text.encode(enc, errors="replace").decode(enc)
+    except Exception:
+        return text
+
+
 def slugify(text):
     """Convert text to filename-safe slug."""
     text = text.lower().strip()
@@ -52,6 +69,12 @@ Examples:
                              "without the synthesis section (no error).")
     parser.add_argument("--validate", type=int, default=50,
                         help="Max URLs to validate (default: 50)")
+    parser.add_argument("--proxy", action="store_true",
+                        help="Enable proxy retry for blocked/dead URLs "
+                             "(NECOBOX at http://127.0.0.1:2080 by default; "
+                             "same as the GUI proxy checkbox)")
+    parser.add_argument("--proxy-url", default="http://127.0.0.1:2080",
+                        help="Proxy URL (default: http://127.0.0.1:2080)")
     parser.add_argument("--output", "-o", default=None,
                         help="Output .md file path (default: auto-generated)")
     parser.add_argument("--quiet", "-q", action="store_true",
@@ -67,14 +90,18 @@ Examples:
               + (f" (query_type={args.query_type})" if args.query_type else ""))
         print("=" * 60)
 
-    # Run pipeline
+    # Run pipeline. Progress goes through a console-safe logger (cp1251
+    # consoles crash on the pipeline's non-ASCII glyphs otherwise).
     result = run_deep_research(
         query=args.query,
         server_url=args.server,
         model=args.model,
         max_validate=args.validate,
-        verbose=not args.quiet,
+        verbose=False,
+        log=None if args.quiet else (lambda msg: print("  " + _console_safe(msg), flush=True)),
         query_type=args.query_type,
+        proxy_enabled=args.proxy,
+        proxy_url=args.proxy_url,
     )
 
     # Output report
