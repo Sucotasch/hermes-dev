@@ -891,6 +891,47 @@ def _filter_images_light(images, log=None):
     return kept
 
 
+def _dhash(pil_img, hash_size=8):
+    """64-bit difference hash (dHash) for near-duplicate image detection.
+
+    The same picture re-encoded (webp vs jpg) or resized (thumbnail vs full)
+    hashes identically (hamming 0); different photos measure 20+ apart.
+    Measured on real duplicates from the 2026-09-04 visual run:
+    wallpapers.com webp/jpg pairs = 0, vecteezy full/thumb = 0,
+    distinct wallpapers = 22-30. Threshold 8 is safely below the gap.
+    Returns None when the image cannot be converted/resized.
+    """
+    try:
+        from PIL import Image
+        img = pil_img.convert("L").resize((hash_size + 1, hash_size), Image.LANCZOS)
+    except Exception:
+        return None
+    px = list(img.getdata())
+    bits = 0
+    for row in range(hash_size):
+        for col in range(hash_size):
+            left = px[row * (hash_size + 1) + col]
+            right = px[row * (hash_size + 1) + col + 1]
+            bits = (bits << 1) | (1 if left > right else 0)
+    return bits
+
+
+def _referrer_for(img_url):
+    """Site-root Referer for image downloads (hotlink protection).
+
+    Most hotlink-protected CDNs accept any same-site-ish referrer; a bare
+    site root from the image's own host is the safest generic choice.
+    """
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(img_url)
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}/"
+    except Exception:
+        pass
+    return None
+
+
 def _filter_images_for_report(images, log=None):
     """Filter images: skip bad formats, dedup by content hash, enforce minimum size.
 
@@ -967,11 +1008,11 @@ def _filter_images_for_report(images, log=None):
             cache[key] = curl_cffi.requests.Session(impersonate="chrome")
         return cache[key]
 
-    def _try_download(url, proxy=None):
+    def _try_download(url, proxy=None, headers=None):
         sess = _get_img_session(proxy)
         if sess is not None:
             try:
-                r = sess.get(url, timeout=8, proxy=proxy)
+                r = sess.get(url, timeout=8, proxy=proxy, headers=headers)
                 if r.status_code == 200:
                     return r.content
             except Exception:
@@ -979,7 +1020,7 @@ def _filter_images_for_report(images, log=None):
             return None
         # Fallback: no curl_cffi in this interpreter → plain httpx
         try:
-            resp = httpx.get(url, timeout=5, follow_redirects=True, proxy=proxy)
+            resp = httpx.get(url, timeout=5, follow_redirects=True, proxy=proxy, headers=headers)
             if resp.status_code == 200:
                 return resp.content
         except Exception:
@@ -989,19 +1030,25 @@ def _filter_images_for_report(images, log=None):
     # Phase 1: Direct download
     quarantine = []
     seen_hashes = set()
+    seen_dhashes = set()   # perceptual (dHash) — catches webp/jpg + thumb/full dups
     filtered = []
+    phase1_dups = 0
 
     def _process_phase1(img):
         if _is_skippable(img['url']):
             return None
-        content = _try_download(img['url'], proxy=None)
+        # Referer beats hotlink protection on image CDNs (some hosts 403
+        # image requests without a referring page).
+        headers = {"Referer": _referrer_for(img['url'])}
+        content = _try_download(img['url'], proxy=None, headers=headers)
         if content is None:
             return {'img': img, 'quarantine': True}
         try:
             content_hash = md5(content).hexdigest()
             pil_img = Image.open(io.BytesIO(content))
             w, h = pil_img.size
-            return {'img': img, 'hash': content_hash, 'width': w, 'height': h, 'quarantine': False}
+            dh = _dhash(pil_img)
+            return {'img': img, 'hash': content_hash, 'dhash': dh, 'width': w, 'height': h, 'quarantine': False}
         except:
             return None
 
@@ -1019,29 +1066,42 @@ def _filter_images_for_report(images, log=None):
             continue
         if r['hash'] in seen_hashes:
             continue
+        # Perceptual dedup (dHash hamming <= 8): merges the same photo found
+        # as webp+jpg, full+thumbnail, or re-encoded across pages — byte-MD5
+        # can't see these, users see them as duplicates.
+        dh = r.get('dhash')
+        if dh is not None and any(bin(dh ^ seen).count("1") <= 8
+                                  for seen in seen_dhashes):
+            phase1_dups += 1
+            continue
         if r['width'] < MIN_WIDTH or r['height'] < MIN_HEIGHT:
             continue
         seen_hashes.add(r['hash'])
+        if dh is not None:
+            seen_dhashes.add(dh)
         r['img']['width'] = r['width']
         r['img']['height'] = r['height']
         filtered.append(r['img'])
 
     # Phase 2: Proxy retry for quarantined images
     phase2_recovered = 0
+    phase2_dup = 0
     if quarantine and ddg_search.USE_PROXY and ddg_search.PROXY_URL:
         proxy = ddg_search.PROXY_URL
 
         def _process_phase2(img):
             if _is_skippable(img['url']):
                 return None
-            content = _try_download(img['url'], proxy=proxy)
+            headers = {"Referer": _referrer_for(img['url'])}
+            content = _try_download(img['url'], proxy=proxy, headers=headers)
             if content is None:
                 return None
             try:
                 content_hash = md5(content).hexdigest()
                 pil_img = Image.open(io.BytesIO(content))
                 w, h = pil_img.size
-                return {'img': img, 'hash': content_hash, 'width': w, 'height': h}
+                dh = _dhash(pil_img)
+                return {'img': img, 'hash': content_hash, 'dhash': dh, 'width': w, 'height': h}
             except:
                 return None
 
@@ -1058,16 +1118,26 @@ def _filter_images_for_report(images, log=None):
                 continue
             if r['hash'] in seen_hashes:
                 continue
+            # Perceptual dedup: near-duplicate images (webp/jpg re-encodes,
+            # thumbnail/fullsize resizes) measure hamming 0-2; distinct
+            # photos measure 20+. Keep the first occurrence.
+            dh = r.get('dhash')
+            if dh is not None and any(bin(dh ^ seen).count("1") <= 8
+                                      for seen in seen_dhashes):
+                phase2_dup += 1
+                continue
             if r['width'] < MIN_WIDTH or r['height'] < MIN_HEIGHT:
                 continue
             seen_hashes.add(r['hash'])
+            if dh is not None:
+                seen_dhashes.add(dh)
             r['img']['width'] = r['width']
             r['img']['height'] = r['height']
             filtered.append(r['img'])
             phase2_recovered += 1
 
     if log:
-        log(f"    Image filter: {len(images)} → {len(filtered)} (quarantine: {len(quarantine)}, proxy recovered: {phase2_recovered})")
+        log(f"    Image filter: {len(images)} → {len(filtered)} (quarantine: {len(quarantine)}, proxy recovered: {phase2_recovered}, near-dup dropped: {phase1_dups + phase2_dup})")
 
     return filtered
 
