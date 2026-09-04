@@ -230,7 +230,7 @@ class HermesCheckThread(QThread):
                     self.log.emit(f"  stderr: {result.stderr[:500]}")
             self.status.emit("Restore complete — re-checking...")
         except subprocess.TimeoutExpired:
-            self.log.emit("Restore timed out (120s)")
+            self.log.emit("Restore timed out (300s)")
         except Exception as e:
             self.log.emit(f"Restore error: {e}")
 

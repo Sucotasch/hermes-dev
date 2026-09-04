@@ -4,13 +4,18 @@
 # button) after a Hermes update/reinstall, or whenever the pipeline looks
 # broken. It:
 #   1. syncs custom tools, web plugins and skills into ~/.hermes
-#   2. installs missing Python packages into the Hermes venv (ddgs, bs4,
-#      trafilatura, htmldate, lxml, curl_cffi, httpx) - venv is often recreated by updates
+#   2. installs missing Python packages into the Hermes venv — FAST-FAIL:
+#      one pip attempt per package with short timeouts; a package that
+#      can't be installed is reported, never hung on (pip default retries
+#      stack minutes of silent network timeouts per package)
 #   3. py_compile-checks every synced file
-#   4. runs restore_check.py for the final verdict: are all 5 tools
-#      registered and are all deps importable? Prints OK/BROKEN.
+#   4. runs restore_check.py for the verdict: are all 5 tools registered
+#      and are all deps importable? Prints OK/BROKEN.
+#   5. -RunSmoke: live network probe — one web_search_deep call through
+#      the REAL Hermes registry (replaces the dead deep_test_vargas.py
+#      reference; verifies the whole chain incl. network + backend).
 #
-# No backups in v3: the repo is the source of truth (and it is in git).
+# No backups (v3+): the repo is the source of truth (and it is in git).
 # -SkipBackup is accepted for GUI compatibility and does nothing.
 # Hermes is NOT stopped by default (use -StopHermes); -NoStopHermes is
 # accepted for GUI compatibility and does nothing either.
@@ -18,8 +23,8 @@
 # Usage:
 #   .\restore.ps1              # full check + restore
 #   .\restore.ps1 -DryRun      # show what would happen, change nothing
-#   .\restore.ps1 -RunSmoke    # also run the live compose smoke probe
-#   .\restore.ps1 -NoStopHermes
+#   .\restore.ps1 -RunSmoke    # also run the live network smoke probe
+#   .\restore.ps1 -StopHermes  # try to stop Hermes processes first
 param(
     [switch]$DryRun,
     [switch]$NoStopHermes,
@@ -92,6 +97,7 @@ if (-not (Test-Path $HermesHome)) { Log "ERROR: Hermes home not found at $Hermes
 
 $Venv = Join-Path $HermesHome 'hermes-agent\venv\Scripts\python.exe'
 $CheckPy = Join-Path $RepoRoot 'restore_check.py'
+$SmokePy = Join-Path $RepoRoot 'restore_smoke.py'
 $HadFailure = $false
 
 Log "Repo: $RepoRoot"
@@ -100,6 +106,9 @@ if ($DryRun) { Log 'Running in DryRun mode; no changes applied.' }
 if ($NoBackup) { Log 'Note: backups were removed in v3 (git repo is the source of truth).' }
 
 # ---- Manifest: exactly what we sync (repo wins) ------------------------------
+# compose.py added v4: ddg_search.py imports it lazily when the agent calls
+# web_deep_research(..., compose=True) — a live copy without it silently
+# falls back to raw JSON.
 $Files = @(
     @{ Repo = 'hermes-agent\tools\ddg_search_tool.py'; Dest = 'hermes-agent\tools\ddg_search_tool.py' }
     @{ Repo = 'hermes-agent\tools\browser_dialog_tool.py'; Dest = 'hermes-agent\tools\browser_dialog_tool.py' }
@@ -113,6 +122,7 @@ $Files = @(
     @{ Repo = 'plugins\web-tools\ddg\junk_filter.py'; Dest = 'plugins\web-tools\ddg\junk_filter.py' }
     @{ Repo = 'plugins\web-tools\ddg\discovery.py'; Dest = 'plugins\web-tools\ddg\discovery.py' }
     @{ Repo = 'plugins\web-tools\ddg\evidence_rank.py'; Dest = 'plugins\web-tools\ddg\evidence_rank.py' }
+    @{ Repo = 'plugins\web-tools\ddg\compose.py'; Dest = 'plugins\web-tools\ddg\compose.py' }
     @{ Repo = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json'; Dest = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json' }
     @{ Repo = 'plugins\web-tools\ddg\resources\junk_allowlist.txt'; Dest = 'plugins\web-tools\ddg\resources\junk_allowlist.txt' }
     @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
@@ -121,7 +131,7 @@ $Files = @(
 
 Stop-HermesIfRunning
 
-# ---- 1) Sync ----------------------------------------------------------------
+# ---- 1) Sync (fast: ~18 small files, milliseconds) ---------------------------
 foreach ($f in $Files) {
     $src = Join-Path $RepoRoot $f.Repo
     $dst = Join-Path $HermesHome $f.Dest
@@ -136,12 +146,23 @@ foreach ($f in $Files) {
     if ($DryRun) {
         Log "DRY-RUN copy: $($f.Repo)"
     } else {
-        Copy-Item $src $dst -Force
-        Log "Synced: $($f.Repo)"
+        # Copy only when bytes differ — keeps mtimes stable for reruns.
+        $same = $false
+        if (Test-Path $dst) {
+            $srcHash = (Get-FileHash $src -Algorithm MD5).Hash
+            $dstHash = (Get-FileHash $dst -Algorithm MD5).Hash
+            $same = ($srcHash -eq $dstHash)
+        }
+        if ($same) {
+            Log "unchanged: $($f.Repo)"
+        } else {
+            Copy-Item $src $dst -Force
+            Log "Synced: $($f.Repo)"
+        }
     }
 }
 
-# ---- 2) Dependencies (only install what is missing; offline-safe reruns) -----
+# ---- 2) Dependencies: one combined import probe, then one fast-fail pip pass --
 if (Test-Path $Venv) {
     $Deps = @(
         @{ Pkg = 'ddgs';          Mod = 'ddgs' }
@@ -151,25 +172,57 @@ if (Test-Path $Venv) {
         @{ Pkg = 'lxml';          Mod = 'lxml' }
         @{ Pkg = 'curl_cffi';     Mod = 'curl_cffi' }
         @{ Pkg = 'httpx';         Mod = 'httpx' }
+        @{ Pkg = 'pillow';        Mod = 'PIL' }
+        @{ Pkg = 'pypdf';         Mod = 'pypdf' }
     )
+    # Single python process checks ALL deps at once (~1s instead of 7-9
+    # interpreter startups at 200-800ms each), prints one line per dep.
+    $probeCode = @'
+import importlib, json, sys
+mods = sys.argv[1].split(',')
+out = {m: True for m in mods}
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except Exception:
+        out[m] = False
+print(json.dumps(out))
+'@
+    $modsArg = ($Deps | ForEach-Object { $_.Mod }) -join ','
+    $probeOut = & $Venv -c $probeCode $modsArg 2>$null | Select-Object -Last 1
+    $depState = @{}
+    try { $depState = $probeOut | ConvertFrom-Json } catch {}
+    $missing = @()
     foreach ($d in $Deps) {
-        & $Venv -c "import $($d.Mod)" 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        $present = $depState.($d.Mod)
+        if ($present) {
             Log "dep OK: $($d.Mod)"
-            continue
-        }
-        if ($DryRun) {
-            Log "DRY-RUN would install: $($d.Pkg)"
-            continue
-        }
-        Log "dep missing: $($d.Mod) - installing $($d.Pkg) ..."
-        $pipOut = & $Venv -m pip install --disable-pip-version-check --timeout 30 $d.Pkg 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Log "dep installed: $($d.Mod)"
         } else {
-            Log "dep INSTALL FAILED: $($d.Pkg)"
-            $pipOut | Select-Object -Last 6 | ForEach-Object { Log "    $_" }
-            $HadFailure = $true
+            Log "dep missing: $($d.Mod) (pip: $($d.Pkg))"
+            $missing += $d.Pkg
+        }
+    }
+    if ($missing.Count -gt 0) {
+        if ($DryRun) {
+            Log "DRY-RUN would install (one fast-fail pip pass): $($missing -join ', ')"
+        } else {
+            Log "Installing $($missing.Count) missing package(s): $($missing -join ', ') ..."
+            # FAST-FAIL: single pip invocation for ALL missing packages with
+            # one retry and short socket timeout. pip's defaults (--retries 5
+            # x 75s connect) stack minutes of silent hangs per package when
+            # the network/index is unreachable — that is what made restore
+            # appear to 'copy files extremely slowly'.
+            $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check',
+                          '--retries', '1', '--timeout', '15', '--') + $missing
+            $pipOut = & $Venv @pipArgs 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Log "deps installed: $($missing -join ', ')"
+            } else {
+                Log 'dep INSTALL FAILED (offline or pip error) - pipeline still synced;'
+                Log '  install manually when online:  venv\Scripts\pip install ' + ($missing -join ' ')
+                $pipOut | Select-Object -Last 6 | ForEach-Object { Log "    $_" }
+                $HadFailure = $true
+            }
         }
     }
 } else {
@@ -187,12 +240,30 @@ $Targets = @(
     'plugins\web-tools\ddg\junk_filter.py',
     'plugins\web-tools\ddg\discovery.py',
     'plugins\web-tools\ddg\evidence_rank.py',
+    'plugins\web-tools\ddg\compose.py',
     'plugins\web-tools\ddg\_coverage.py',
     'plugins\web-tools\ddg\_common.py',
     'hermes-agent\tools\ddg_search_tool.py',
     'hermes-agent\tools\browser_dialog_tool.py'
 )
 if (Test-Path $Venv) {
+    # One python process compiles ALL targets (~1.5s instead of 13 separate
+    # interpreter startups, ~200ms each).
+    $compileCode = @'
+import py_compile, sys
+failed = []
+for path in sys.argv[1:]:
+    try:
+        py_compile.compile(path, doraise=True)
+    except Exception as e:
+        failed.append((path, str(e)[:200]))
+if failed:
+    for p, e in failed:
+        print('FAIL\t' + p + '\t' + e)
+    sys.exit(1)
+print('COMPILED\t' + str(len(sys.argv) - 1))
+'@
+    $targetPaths = @()
     foreach ($rel in $Targets) {
         $path = Join-Path $HermesHome $rel
         if (-not (Test-Path $path)) {
@@ -200,19 +271,25 @@ if (Test-Path $Venv) {
             $HadFailure = $true
             continue
         }
+        $targetPaths += $path
+    }
+    if ($targetPaths.Count -gt 0) {
         if ($DryRun) {
-            Log "DRY-RUN py_compile: $rel"
-            continue
-        }
-        # Direct invocation: Start-Process + -Redirect* swallows the child
-        # exit code on some Windows builds. Plain & is reliable.
-        $pyOutput = & $Venv -m py_compile $path 2>&1
-        $compileExit = $LASTEXITCODE
-        if ($compileExit -eq 0) {
-            Log "py_compile OK: $rel"
+            foreach ($p in $targetPaths) { Log "DRY-RUN py_compile: $p" }
         } else {
-            Log "py_compile FAILED: $rel -> $pyOutput"
-            $HadFailure = $true
+            $compileOut = & $Venv -c $compileCode @targetPaths 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Log "py_compile OK: $($targetPaths.Count) files"
+            } else {
+                foreach ($line in $compileOut) {
+                    if ($line -match '^FAIL\t(.+)\t(.+)$') {
+                        Log "py_compile FAILED: $($Matches[1]) -> $($Matches[2])"
+                    } else {
+                        Log "    $line"
+                    }
+            }
+                $HadFailure = $true
+            }
         }
     }
 }
@@ -242,23 +319,24 @@ if (Test-Path $CheckPy) {
 }
 
 # ---- Optional live smoke probe (off by default; needs network) ---------------
+# One real web_search_deep call through the REAL Hermes registry (stub-free):
+# loads the wrapper exactly like Hermes does, discovers builtin tools, calls
+# the tool handler with validate=5, expects >0 results. Verifies the whole
+# chain: registry -> wrapper -> plugins -> network -> backend.
 if ($RunSmoke -and -not $DryRun -and -not $HadFailure) {
-    $Probe = Join-Path $HermesHome 'hermes-dev\deep_test_vargas.py'
-    if (Test-Path $Probe) {
-        Log 'Running compose smoke probe (RunSmoke)...'
-        $outF = Join-Path $env:TEMP 'restore_smoke_out.txt'
-        $errF = Join-Path $env:TEMP 'restore_smoke_err.txt'
-        $proc = Start-Process -FilePath $Venv -ArgumentList @($Probe) -NoNewWindow -PassThru -RedirectStandardOutput $outF -RedirectStandardError $errF
-        if (-not $proc.WaitForExit(240000)) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            Log 'compose smoke probe TIMEOUT (240s) - skipped.'
+    if (Test-Path $SmokePy) {
+        Log 'Running live smoke probe (web_search_deep, ~30-60s)...'
+        $smokeOut = & $Venv $SmokePy 2>&1
+        $smokeExit = $LASTEXITCODE
+        foreach ($line in ($smokeOut | Select-Object -Last 6)) { Log "  $line" }
+        if ($smokeExit -eq 0) {
+            Log 'smoke probe: OK'
         } else {
-            Log "compose smoke probe exit: $($proc.ExitCode)"
-            $out = Get-Content $outF -Tail 3 -ErrorAction SilentlyContinue
-            if ($out) { Log "compose smoke probe output: $out" }
+            Log 'smoke probe: FAILED'
+            $HadFailure = $true
         }
     } else {
-        Log "Smoke probe script not found at $Probe - skipping."
+        Log "Smoke probe script not found ($SmokePy) - skipping."
     }
 } elseif ($RunSmoke) {
     Log 'Smoke probe skipped (DryRun or previous failures).'
