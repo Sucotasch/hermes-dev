@@ -1,8 +1,12 @@
 # Hermes Deep Research Pipeline
 
-**Hermes Deep Research** is a robust, dual-mode deep web research pipeline designed originally for the Hermes Agent. It operates with **zero external search API dependencies** (no SerpApi, SearchAPI, or Felo keys required), enabling multi-engine evidence collection, comprehensive URL validation, full-size image extraction, and anti-bot bypassing.
+**Hermes Deep Research** is a robust, multi-agent deep web research pipeline designed originally for the Hermes Agent. It operates with **zero external search API dependencies** (no SerpApi, SearchAPI, or Felo keys required), enabling multi-engine evidence collection, comprehensive URL validation, full-size image extraction, and anti-bot bypassing.
 
-The pipeline can be used as a seamlessly integrated plugin for the Hermes Agent or as a fully independent standalone application (CLI & GUI) powered by local LLMs like `llama.cpp`, `vLLM`, `Ollama`, or `LMStudio`.
+One policy-free backend feeds three consumers:
+
+1. a seamlessly integrated **Hermes Agent plugin**,
+2. a fully independent **standalone application** (CLI & GUI) powered by local LLMs like `llama.cpp`, `vLLM`, `Ollama`, or `LMStudio` (or no LLM at all),
+3. **AI coding agents** (DeepSeek Harness and similar) via a CLI bridge (`webtools_bridge.py`) that turns the pipeline into `search` / `read` / `image` / `expand` / `render` primitives with no API keys, plus an agent-skill wrapper (`skills/hermes-web-tools/`).
 
 ---
 
@@ -25,6 +29,7 @@ The pipeline can be used as a seamlessly integrated plugin for the Hermes Agent 
 - **Quality Evidence Selection**: RRF fusion of multi-variant results, title-normalized dedup, MMR diversification (aspect-aware), saturation-based expansion stop, BM25-ranked evidence chunk selection, optional cross-encoder reranking (`DDG_RERANK=1`).
 - **Clean Content Extraction**: Trafilatura main-content extraction (guarded, legacy fallback) plus readability-style cleaning of nav/footer/boilerplate.
 - **No-LLM Standalone Mode**: `--no-llm` (CLI) / *No LLM checkbox* (GUI) runs the standalone pipeline with zero LLM requests — the report is built from the gathered evidence only (honest "synthesis skipped" note instead of a summary section). A manual query type (`--query-type` / GUI dropdown) skips just the classification call; enrichment/synthesis stay on with patient timeouts for slow-loading local servers.
+- **AI-Agent Bridge (DeepSeek Harness et al.)**: `webtools_bridge.py` exposes the whole pipeline as seven zero-API CLI primitives — `search`, `read` (fetch + extract page text, Wayback fallback), `image`, `expand` (Level-2), `render` (inline-JS via vendored Deno, no headless browser), `probe` (claim verification), `mfetch` (full-browser tier) — with disk caching (repeat calls ~0.5 s), anti-bot challenge detection, TLS impersonation, and optional proxy. Output is UTF-8 JSON to a file; stdout stays ASCII-safe. The agent (Claude Code, Codex, DSH, any CLI-driven agent) reads the evidence and synthesizes itself — the bridge never calls an LLM.
 - **Agent-Side Synthesis**: raw JSON evidence packs for the agent, or local-LLM synthesis into cited Markdown reports.
 
 ---
@@ -35,7 +40,7 @@ The pipeline can be used as a seamlessly integrated plugin for the Hermes Agent 
 A unified backend (`plugins/web-tools/ddg/`) is driven by three modes:
 1. **Hermes Plugin Mode**: wrappers register tools into the Hermes Agent's `tools.registry`. Entry point: `hermes-agent/tools/ddg_search_tool.py`.
 2. **Standalone Mode (CLI/GUI)**: bypasses the Hermes framework; `standalone/orchestrator.py` drives the backend, `standalone/llm_client.py` talks to any OpenAI-compatible local API server.
-3. **DeepSeek Harness Bridge Mode** (v2+): exposes the same backend as plain Python CLI primitives for the DeepSeek Harness environment. See `webtools_bridge.py` (this repo) + an external skill `hermes-web-tools` (installed at `~/.dsh/skills/`). The bridge installs a no-op registry stub to load the Hermes wrapper without the full Hermes framework, then provides five subcommands (`search`, `read`, `image`, `expand`, `render`). A vendored Deno 2.7.7 engine + happy-dom (in `deno/`, gitignored) provides lightweight inline-JS execution without a headless browser.
+3. **DeepSeek Harness Bridge Mode** (v2+): exposes the same backend as plain Python CLI primitives for any AI coding agent (DeepSeek Harness first). See `webtools_bridge.py` (this repo) + the `hermes-web-tools` skill (this repo: `skills/hermes-web-tools/SKILL.md`; installed into the Harness skill store at `~/.dsh/skills/`). The bridge installs a no-op registry stub to load the Hermes wrapper without the full Hermes framework, then provides seven subcommands (`search`, `read`, `image`, `expand`, `render`, `probe`, `mfetch`). A vendored Deno 2.7.7 engine + happy-dom (in `deno/`, gitignored) provides lightweight inline-JS execution without a headless browser.
 
 ### Deep Research Workflow
 1. **Intent Classification** — LLM assigns `query_type` (visual, technical, news, person, comparison, ...).
@@ -66,8 +71,9 @@ A unified backend (`plugins/web-tools/ddg/`) is driven by three modes:
 | `plugins/web-tools/ddg/compose.py` | Markdown answer formatting (compose mode). |
 | `standalone/orchestrator.py` | Standalone pipeline manager (crawl layer, sieve, BM25, image filter). |
 | `standalone/llm_client.py` | OpenAI-compatible local LLM client (Ollama, llama.cpp, vLLM, LMStudio). |
-| `webtools_bridge.py` | Harness bridge: registry-stub loader + `search`/`read`/`image`/`expand`/`render` CLI over the same backend. |
+| `webtools_bridge.py` | Agent bridge: registry-stub loader + `search`/`read`/`image`/`expand`/`render`/`probe`/`mfetch` CLI + disk cache + Wayback fallback over the same backend. |
 | `js_engine/render_worker.js` | Deno happy-dom worker (inline-JS execution for `render`); engine binaries live in gitignored `deno/`. |
+| `skills/hermes-web-tools/SKILL.md` | Agent-skill wrapper for the bridge (invocation, output schemas, synthesis discipline); installed into the DSH skill store. |
 | `restore.ps1` + `restore_check.py` | One-button deploy/health-check for Hermes plugin mode (see below). |
 
 ---
@@ -93,7 +99,19 @@ cd hermes-dev
 python standalone/deep_research.py "your query" --server http://127.0.0.1:11434
 ```
 
-### 2b. Deploy to Hermes Agent (Windows) — one-button restore
+### 2b. AI coding agent (DeepSeek Harness, Codex, Claude Code, …) — zero-API web tools
+Your agent gets `search` / `read` / `image` / `expand` / `render` primitives with no search-API keys, backed by the same pipeline. No Hermes, no LLM server needed — the agent itself synthesizes from the returned evidence.
+
+```bash
+git clone https://github.com/Sucotasch/hermes-dev.git
+python webtools_bridge.py search --query "solid state battery 2026" --max-validate 8   # JSON to %TEMP%
+# then install the skill so the agent knows when/how to call the bridge:
+mkdir -p ~/.dsh/skills/hermes-web-tools && cp skills/hermes-web-tools/SKILL.md ~/.dsh/skills/hermes-web-tools/
+```
+
+(For DSH specifically, edit the `Runtime` path in the installed SKILL.md to point at your clone. Deno render tier: copy `deno.exe` + `deno_cache/` into `deno/` once — see [Bridge](#4-deepseek-harness-bridge-agents-own-web-tooling).)
+
+### 2c. Deploy to Hermes Agent (Windows) — one-button restore
 `restore.ps1` is a check-and-repair tool: it syncs the manifest files from the repo into `~/.hermes`, installs missing venv deps, py_compile-checks everything, and runs `restore_check.py` for the final verdict (5 tools registered + deps importable). No backups are made — the git repo is the source of truth. It cannot hang: process stop is opt-in, WMI is not touched by default.
 
 ```powershell
@@ -162,18 +180,20 @@ for item in out["results"]:  # results sorted by relevance
 ```
 
 ### 4. DeepSeek Harness bridge (agent's own web tooling)
-The bridge turns the same backend into plain CLI primitives for the DeepSeek Harness
-(where the built-in `web_search` needs an API key that this environment lacks).
-All output goes to a UTF-8 JSON file (unique default in `%TEMP%`); stdout carries only
-an ASCII status line (Windows cp1251-safe).
+The bridge turns the same backend into plain CLI primitives for any AI coding
+agent (where the built-in `web_search` often needs an API key the environment
+lacks). All output goes to a UTF-8 JSON file (unique default in `%TEMP%`);
+stdout carries only an ASCII status line (Windows cp1251-safe).
 
 ```powershell
-# search / read / image / expand / render
+# search / read / image / expand / render / probe / mfetch
 python webtools_bridge.py search --query "solid state battery" --max-validate 8 --out "$env:TEMP\w_search.json"
 python webtools_bridge.py read --url "https://example.com" --max-chars 8000 --out "$env:TEMP\w_read.json"
 python webtools_bridge.py image --query "red panda" --out "$env:TEMP\w_image.json"
 python webtools_bridge.py expand --query "topic" --urls "https://a.example,https://b.example" --out "$env:TEMP\w_expand.json"
 python webtools_bridge.py render --url "https://js-heavy.example" --out "$env:TEMP\w_render.json"
+python webtools_bridge.py probe --claim "llama.cpp supports flash attention" --out "$env:TEMP\w_probe.json"
+python webtools_bridge.py mfetch --url "https://cloudflare-protected.example" --out "$env:TEMP\w_mfetch.json"
 ```
 
 Bridge-only extras over the backend:
@@ -191,8 +211,10 @@ New-Item -ItemType Directory -Force -Path deno | Out-Null
 Copy-Item "$srcBin\deno.exe" deno\deno.exe
 Copy-Item -Recurse "$srcBin\deno_cache" deno\deno_cache
 ```
-The companion skill `hermes-web-tools` (in the Harness skill store, outside this repo)
-documents invocation, output schemas, and the agent-side synthesis discipline.
+The companion skill `hermes-web-tools` (versioned in this repo at
+`skills/hermes-web-tools/SKILL.md`; a copy lives in the Harness skill store
+`~/.dsh/skills/`) documents invocation, output schemas, and the agent-side
+synthesis discipline.
 
 ---
 
