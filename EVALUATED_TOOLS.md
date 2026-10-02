@@ -1,6 +1,9 @@
-# Evaluated alternatives — DonSeTch, ratsearch & Moli
+# Evaluated alternatives — donsetch, ratsearch, Moli, crawl4ai, maigret, reddit-dl, untidetect-tools
 
-Status: evaluated 2026-08-30 (DonSeTch, ratsearch) and 2026-09-02 (Moli).
+Status: evaluated 2026-08-30 (DonSeTch, ratsearch), 2026-09-02 (Moli),
+2026-09 (five-repo reuse review: donsetch, crawl4ai, maigret, reddit-dl,
+untidetect-tools — see §4, plus the donsetch deep dive in §5 and the MCP
+notes in §6).
 Recorded so the agent knows these projects exist and what is worth porting
 into our own web tooling (webtools_bridge + pipeline).
 
@@ -146,6 +149,268 @@ Priority-ordered. Implemented items are marked.
   provenance from the ddgs backend — deferred)
 - [ ] **Offline Wikipedia (.zim) backend** — optional offline fact layer.
 - [ ] **Page-memory / since_last** — fetch fingerprint + diff (lower priority).
+
+Candidates surfaced by the five-repo review (§4/§5); none started, none approved:
+
+- [ ] **Persistent wall memory + backoff** — disk-backed per-host
+  `verdict/rung/boxed_until` beside the bridge cache, so a wall that beat us is
+  not re-paid every run. Copy donsetch's numbers (`BASE_DELAY=200 ms`,
+  `MAX_BACKOFF_RUNG=6`, 7 s ladder cap, jitter 0.75–1.25, `rung+2` on 429/503,
+  `rung-1` on success, 7 d TTL, 2000-host cap). ~140 lines in one new module.
+  **Cheapest real win; works inside the sandbox.**
+- [ ] **Cookie file support** — `--cookies cookies.txt` (Netscape) plumbed into
+  the existing, currently unused `_fetch(cookies=...)` seam. Import only; unlocks
+  gated/rate-capped sources. ~40 lines.
+- [ ] **Browser→HTTP cookie handoff (solve-and-bounce)** — harvest clearance
+  cookies after a Moli solve and replay them in the HTTP tier. Needs a spike
+  first (§5d): JSON output carries no cookies, `--eval` cannot see HttpOnly, and
+  `--profile-dir` persistence fails in the sandbox — so this must be prototyped
+  in the standalone chain, and the CDP path is UNCERTAIN.
+- [ ] **Feed/RSS extraction** — first-class RSS 2.0 / Atom / JSON Feed path
+  (`MAX_ITEMS=60`, `<link>`→`<rsslink>` rewrite). We have zero feed support;
+  relevant to `news` queries and blocked-but-syndicated sources.
+- [ ] **Conditional revalidation (304)** — `If-None-Match`/`If-Modified-Since`
+  for the strong-read (6 h) and search (1 h) cache tiers only; skip
+  `Vary: *` / `no-store|private`, clamp `max-age` to ≤3600 s.
+- [ ] **Authority + coverage penalties** — official/depth multipliers, a news
+  freshness table, and entity/version/year coverage penalties (pure regex, no
+  dependencies).
+
+## 4. Five-repo reuse review (2026-09)
+
+Asked: of `thezveroboy/reddit-dl`, `TheGP/untidetect-tools`,
+`unclecode/crawl4ai`, `soxoj/maigret`, `dondai44423/donsetch` — what is worth
+using in our project? Verdicts, with the reason:
+
+| Repo | Licence | Verdict |
+|---|---|---|
+| `dondai44423/donsetch` | AGPL-3.0 | **Ideas only — richest source.** Code must NOT be copied (see §5). |
+| `unclecode/crawl4ai` | Apache-2.0 | **Already harvested.** Tier-1/Tier-2 ideas ported (sitemap seeding, best-first, aspect coverage, PDF, tables, head metadata). Remaining features are browser-tier (rejected) or redundant with ours. Only MCP was new → §6. |
+| `soxoj/maigret` | MIT | **Not adopted.** Far from deep search: it is username→account OSINT over ~6k sites. Its genuinely interesting technique is *false-positive suppression* (`error_detection.py`: site-specific `fail_flags`, then generic bot-protection wording, then status — 403/401/429/999/5xx, with 403 never meaning "username free"). We already have the equivalent shape in `_detect_blocked` + challenge detection, and the 6k-site DB would add noise, not signal. |
+| `thezveroboy/reddit-dl` | none | **Not adopted.** Single-site media downloader. Its one transferable pattern is a user-supplied `cookies.txt` (Reddit caps anonymous requests at 25 posts) — same idea as donsetch's login/cookie vault and the fix for our unused `_fetch(cookies=)`. |
+| `TheGP/untidetect-tools` | none (a list) | **Not adopted.** Curated catalogue, no code: commercial anti-detect browsers, paid captcha solvers, SMS-activation. Conflicts with our zero-API-key, no-account stance; Tier 3 (Playwright/undetected browser) is permanently rejected. Reference only. |
+
+Cross-cutting conclusion: the only real capability gaps these repos revealed
+are (a) browser→HTTP **cookie handoff**, (b) **persistent wall memory +
+backoff**, (c) **feed/RSS** extraction, (d) conditional **revalidation (304)**.
+No repo is worth a dependency; all four are worth re-implementing.
+
+## 5. donsetch deep dive — verified mechanics (idea source, AGPL: do not copy code)
+
+Read from a scratch checkout in `.refs/donsetch/` (gitignored). Constants
+verified in source; the checkout was PARTIAL (no `src/ghost/mod.rs`,
+`src/ghost/cache.rs`, `src/adapters/mod.rs`, no `Cargo.toml`), so a few
+mechanisms are inferred from call sites and tested fixtures — marked UNCERTAIN.
+
+### 5a. Solve-and-bounce (browser solves a wall, HTTP keeps the cookies)
+- Oracle is **multi-signal, not cookie-only**: `small = html.len() < 30_000`
+  and `marker_hit = walls::detect(...)` → challenged; a *clear* verdict needs
+  `clear_streak >= 2` (two polls), plus a mid-navigation guard
+  (`!url.starts_with("about:")` and `html.len() > 500`) so a blank page cannot
+  fake a clear. Poll interval starts 200 ms → 500 ms after 5 s.
+  (`src/ghost/ops.rs::solve`, `small_dom_settle_floor`, `can_hydrate`.)
+- Clearance cookie names corroborate: `cf_clearance`, `datadome`, `_px3`,
+  `ak_bmsc`, `bm_sz`, `reese84`.
+- Harvest is **cookie-store side** (CDP), not `document.cookie` — that is
+  precisely why HttpOnly cookies survive. Exact CDP method UNCERTAIN
+  (`Network.getCookies` vs `Network.getAllCookies`).
+- Jar limits: `MAX_COOKIE_BYTES=4096`, `MAX_COOKIES_PER_DOMAIN=100`,
+  `MAX_COOKIES_TOTAL=3000`, `MAX_COOKIE_HEADER_PAIRS=50`,
+  `MAX_COOKIE_HEADER_BYTES=4096`; attach sorts longest-path-first and skips
+  expired / `secure && !https`.
+- Safety invariant (`tests/it/secure_cookie_leak.rs`): a `Secure` cookie must
+  never replay over plain HTTP — enforced at both ingresses and again at attach.
+- **We already have the seam**: `visit_website_enhanced._fetch(url, referrer,
+  cookies=None)` accepts cookies and no caller uses it; Moli can *import*
+  Netscape cookies (`--cookie-file`) but cannot *export* them (§5d).
+
+### 5b. Wall memory, backoff, pacing, revalidation
+- Vendor fingerprints and the "require a co-signal" rule live in
+  `src/detect/walls.rs` (`Vendor::{Cloudflare,DataDome,Akamai,PerimeterX,
+  Imperva,Sucuri,Wordfence,Generic}`; scan window 256 KiB for 403/429/503,
+  else 64 KiB). Pitfall worth copying: bare vendor prose in an *article*
+  must not fire; `x-datadome` is present on ALL Forbes responses, so status
+  decides; `challenges.cloudflare.com` alone is Turnstile's public embed.
+- Persistent state: `governor_path() = paths::cache_dir()/crawl-governor.json`,
+  `GOVERNOR_DISK_VERSION=1`, `GOVERNOR_HOST_CAP=2000`,
+  `GOVERNOR_TTL=7*86_400 s`; row carries `rung`, `boxed_remaining_secs`,
+  `crawl_delay_secs`; `next_allowed` is process-local and never serialized;
+  saved only on `on_throttled`.
+- Backoff ladder: `BASE_DELAY=200 ms`, `MAX_BACKOFF_RUNG=6`,
+  `MAX_LADDER_WAIT=7 s`, jitter deterministic 0.75–1.25 (xorshift), delay =
+  `base * 2^rung * jitter` capped at 7 s → rungs 0–6 ≈ 150 ms … 12.8 s→7 s.
+  `on_throttled` (429/5xx): lane `rung+2`, host box `rung+1` which **bypasses**
+  the 7 s cap; `on_error`: `rung+1`; `on_success`: `rung-1`.
+- Revalidation (`src/fetch/revalidate.rs`): `if-none-match` / `if-modified-since`;
+  store only 200 with body ≤ 8 MiB; skip `Vary: *` and `no-store|private`;
+  TTL = `max-age` clamped to ≤ 3600 s; FIFO, `MAX_ENTRIES=512`,
+  `MAX_TOTAL_BYTES=64 MiB`. On 304 they **re-score** wall detection (a bare
+  304 was being scored as Blocked) and hard-error if no stored entry exists.
+- ⚠️ **"Cookie-lifetime convergence" does not exist in the source.** Targeted
+  greps for `lifetime|observed_lifetime|last_solved|converg` find only
+  unrelated hits; the README claim is marketing. Do not re-implement a
+  phantom algorithm. `MAX_AGE_SECS = 31*86_400` (`src/fetch/bypass.rs:180`)
+  prunes `bypass-*.count` files — it is **not** a cookie rule.
+
+### 5c. Search fusion, rerank, authority, coverage, feeds
+- Fusion: RRF with `RRF_K=60.0` per *engine family* (max per family, then
+  summed, so correlated engines cannot out-mass independents),
+  `CONSENSUS_MULT=0.5` (`score *= 1 + 0.5*(n-1)`), `BM25_WEIGHT=0.3`,
+  `PRIOR_WEIGHT=0.15`, `MAX_PER_DOMAIN=2`, vertical-only hits `×0.4`,
+  `VERTICAL_WEIGHT=0.6`. Dedup key drops scheme, lowercases host, strips
+  `www.`/trailing `/`/`index.html` and tracking params; a separate
+  **syndication title key keeps punctuation** (C/C++/C# recall).
+- Rerank: local cross-encoder `Xenova/ms-marco-MiniLM-L-6-v2`, ~23 MB
+  quantized ONNX, sha256-pinned, `MAX_SEQ_LEN=512`, blend
+  `final = 0.6·minmax(rrf) + 0.4·minmax(xenc)`, and it **fails open**
+  (scores unchanged if the model is unavailable). We already have an optional
+  guarded cross-encoder (`DDG_RERANK=1`), so only the blend + fail-open
+  pattern is new; the download is avoidable.
+- Coverage is a **penalty**, not diversity: missing hyphenated anchor ×0.3,
+  version major mismatch ×0.3, year mismatch ×0.3 — pure regex, we have
+  nothing like it.
+- Authority: official-domain ×1.6 (×1.8 for code intent), docs-seeking ×1.15,
+  paper authority ×1.35, phrase-in-title ×1.15, and a **news freshness table**
+  (≤1 d 1.5, 2–3 d 1.3, 4–7 d 1.15, 8–30 d 1.0, else 0.85). Hardcoded; only
+  per-engine trust is learned.
+- Feeds: first-class extractor (`src/extract/feed.rs`) — detects by
+  Content-Type (`rss`/`atom`/`feed+json`) or body sniff, supports RSS 2.0 /
+  Atom / JSON Feed, `MAX_ITEMS=60`, rewrites `<link>` → `<rsslink>` before HTML
+  parsing (void-element mangling), no date cutoff. **We have zero feed
+  support** — this is a real gap for `news` queries.
+- Sitemap/frontier: `<loc>` ≤2048, `<lastmod>` ≤64, `priority` seeds the
+  frontier score, sitemap-index recursion, gzip cap 64 MiB, robots
+  `crawl-delay` clamped to 60 s; frontier is a max-heap with a
+  `WINDOW=4`, `WEIGHTS=[8,4,2,1]` head shaper (order-only jitter — every URL is
+  still fetched).
+
+### 5d. Moli cookie reality check (measured on this machine, Moli 1.1.x)
+Empirically verified, because the handoff design depends on it:
+- `moli fetch --dump json` returns only `final_url, status, title, headers,
+  redirect_chain, html` — **no cookie array**; `--trace-network` also carries
+  no `Set-Cookie`. So JSON output is NOT a harvest path.
+- `--eval "document.cookie"` works but **cannot see HttpOnly**, so
+  `cf_clearance` is invisible there. It also cannot be combined with `--dump`
+  (`error: the argument '--dump <DUMP>' cannot be used with '--eval'`).
+- `--cookie-file` (Netscape) is an **import** path and works (verified: an
+  imported `test_cookie=probe_value` was replayed).
+- `--profile-dir` writes `profile.json` declaring a JSON cookie backend at
+  `partitions/default/cookies.json` — a plausible harvest path, BUT in the DSH
+  sandbox profile init fails every time: `failed to sync profile manifest
+  parent directory … os error 5` (also with `danger-full-access`). So
+  persistence is **not verifiable in the sandbox**; it must be tested in the
+  standalone (unsandboxed) chain — exactly the argument for running this
+  experiment outside the sandbox.
+- `moli serve` exposes a CDP-shaped endpoint (default port 9222) and
+  `moli --version`/`fetch --help` confirm it; a `/json/version` probe hung in
+  the sandbox, so the exact CDP cookie method remains UNCERTAIN.
+
+## 6. MCP (Model Context Protocol) — reference notes for possible future use
+
+**Status: notes only, not a priority and not implemented.** Recorded because
+the bridge's seven subcommands are already tools, and MCP is the standard way
+to expose them to hosts we do not own (Claude Code, Codex CLI, Cursor) instead
+of maintaining a bespoke skill per agent. Our current consumers (Harness skill,
+standalone CLI/GUI, Hermes plugin) do not need it.
+
+### What we would expose
+One MCP tool per subcommand — `search`, `read`, `image`, `expand`, `render`,
+`probe`, `mfetch`. Start with three: `search` (discovery), `read` (evidence),
+`probe` (verification — the token-economy win: MATCH/NO-MATCH + ≤3 excerpts
+instead of an 8k-char page). `expand`/`render`/`mfetch` are escalation paths.
+
+### donsetch reference (Rust; four tools)
+Exactly `web_fetch`, `web_search`, `web_crawl`, `web_screenshot` — full input
+schemas captured in `.refs/donsetch/tests/fixtures/tools_list.json`. Schemas
+are generated from one shared spec table, so MCP and CLI cannot drift. Token
+devices worth copying into any future schema: `must_contain`, `focus`,
+`budget_tokens`, `tier` (auto/1/2), `resume`, `since_last`, `toc`/`section`,
+`actions` (1–16 steps), `deadline_ms` ("honest error with next_action, never a
+silent hang").
+
+Transports: **stdio NDJSON** (one message per line, single writer task,
+stdin EOF → graceful shutdown with no orphan browsers) and **HTTP/SSE**
+(`POST/GET/DELETE /mcp`, `Mcp-Session-Id`, bearer token, loopback `Host`
+checks against DNS rebinding, `Origin` refused unless loopback, `/health`).
+Supervisor owns lifecycle; `--supervised` restarts after a panic. A
+`compat.rs` probe detects which of `content`/`structuredContent` a client
+actually shows and folds structured state into a leading `[meta]` block
+(override `DONSETCH_MCP_TEXT_ONLY=1`). Errors: JSON-RPC codes only for
+protocol faults; domain failures carry stable string codes
+(`"code": "network.timeout"`) plus `next_action`.
+
+Registration (from their README, verified):
+```json
+{ "mcpServers": { "donsetch": { "command": "donsetch", "args": ["mcp", "--supervised"] } } }
+```
+Without a global install: `"command": "npx", "args": ["donsetch", "mcp"]`.
+HTTP instead of stdio: `donsetch mcp --http --port 8765`, token via
+`DONSETCH_HTTP_TOKEN`.
+
+### crawl4ai reference
+Cloud MCP over HTTP (verified in its README):
+```bash
+claude mcp add --transport http crawl4ai https://api.crawl4ai.com/mcp \
+  --header "Authorization: Bearer $CRAWL4AI_KEY"
+```
+Self-hosted Docker image `unclecode/crawl4ai:latest` also bundles MCP (needs
+`CRAWL4AI_API_TOKEN`). Note: needs a key — unlike everything else we run.
+
+### Python implementation shape
+Two options, both Python ≥3.10 (versions verified on PyPI):
+- official `mcp` SDK — **2.2.0** (v2 line; `pip install mcp` now installs 2.x.
+  v1.x remains patched: pin `mcp>=1.28,<2` to stay on v1). Its own README
+  example uses `from mcp.server import MCPServer` — **not** the FastMCP
+  spelling.
+- `fastmcp` — **4.0.10** (Apache-2.0, standalone Prefect project; FastMCP 1.0
+  was folded into the official SDK in 2024).
+
+FastMCP shape (type hints + docstring generate the schema):
+```python
+from fastmcp import FastMCP
+mcp = FastMCP("hermes-web")
+
+@mcp.tool
+def web_verify(url: str, claim: str) -> dict:
+    """Return MATCH/NO-MATCH plus up to 3 excerpts for one claim."""
+    ...
+if __name__ == "__main__":
+    mcp.run()   # stdio by default; mcp.run(transport="http", host=..., port=...)
+```
+Auth exists only on HTTP transport (OAuth 2.1 / bearer); stdio needs none.
+
+### Client registration
+```bash
+claude mcp add --transport stdio hermes-web -- python server.py
+```
+Cursor (`~/.cursor/mcp.json`):
+```json
+{ "mcpServers": { "hermes-web": { "command": "python", "args": ["server.py"] } } }
+```
+Codex CLI is `[mcp_servers.*]` in `~/.codex/config.toml` — **UNCERTAIN**: the
+docs redirect cross-origin and the exact TOML shape was not verified. Do not
+copy an unverified block.
+
+### Open questions / risks before ever implementing
+- **Our stdout contract fights MCP**: the bridge prints ASCII-only status lines
+  and puts the UTF-8 payload in a `--out` file (cp1251 safety). MCP returns
+  structured results in-band, so the wrapper's status printing must be
+  silenced and the file handshake dropped.
+- **Lifecycle**: who reaps Deno/Moli child processes when the client exits?
+  donsetch hard-shuts on stdin EOF for exactly this reason.
+- **Cache visibility**: our TTL cache (search 1 h / strong read 6 h / weak
+  5 min / probe 5 min) becomes invisible to the client; expose freshness in
+  `structuredContent`.
+- **Transport choice**: stdio is simplest and auth-free; HTTP needs a token and
+  loopback `Host`/`Origin` hardening (copy donsetch's rules if we ever do it).
+
+### Sources
+[donsetch](https://github.com/dondai44423/donsetch) ·
+[crawl4ai](https://github.com/unclecode/crawl4ai) ·
+[MCP Python SDK](https://pypi.org/project/mcp/) ·
+[FastMCP](https://pypi.org/project/fastmcp/) ·
+[Claude Code MCP](https://code.claude.com/docs/en/mcp) ·
+[Cursor MCP](https://cursor.com/docs/mcp)
 
 ## Reference
 
