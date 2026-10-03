@@ -101,6 +101,8 @@ python standalone/deep_research.py "your query" --server http://localhost:8888
 - IMDB, Wikipedia, Reddit blocked by Cloudflare/JS. JS-block detection flags these correctly.
 - `content_relevance_score` is keyword-based; can't disambiguate "Sara James" from "Sara St James" without explicit logic.
 - Platform domains (blogspot, livejournal) use path-based dedup, not base domain.
+- **DSH harness sandbox cannot run `restore.ps1`**: the PowerShell AuthorizationManager check fails (`Ошибка при проверке AuthorizationManager`) even with full-access escalation. Run it from the user's own terminal. Note the manifest is exact — commits that only touch repo-root files (bridge, docs) or add plugin modules not yet in the manifest are restore no-ops; verify with the manifest list in `restore.ps1` before invoking.
+- **pytest `tmp_path` is not reliably usable under the DSH sandbox** (`WinError 5` on the `pytest-of-*` dir, even though plain writes to `%TEMP%` work). Write hermetic per-test state dirs inside the repo instead (see the `state_dir` fixture in `plugins/web-tools/ddg/test_wall_memory.py`).
 
 ### Bridge gotchas
 
