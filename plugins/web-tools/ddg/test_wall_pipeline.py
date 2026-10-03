@@ -84,7 +84,7 @@ def test_gate_check_throttled_host_sleeps_ladder(wall, monkeypatch):
     assert lo <= slept[0] <= min(hi, wm.MAX_LADDER_WAIT)
 
 
-def test_gate_check_no_module_fails_open(monkeypatch):
+def test_gate_check_no_module_fails_open(wall, monkeypatch):
     monkeypatch.setattr(ddg_search, "_WALL", None)
     assert ddg_search._wall_gate_check("http://any.example/") is None
     ddg_search._wall_note_check("http://any.example/", _check(alive=True))

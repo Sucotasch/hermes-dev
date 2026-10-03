@@ -856,6 +856,141 @@ def _fetch_pdf_text(url, max_bytes=_PDF_MAX_BYTES, max_pages=_PDF_MAX_PAGES):
 
 
 # ── Visit with full bypass ─────────────────────────────────────────────────
+# ── Feed fast path (RSS 2.0 / Atom / JSON Feed) ─────────────────────────────
+# A feed URL is not a web page: the HTML parser mangles its XML — <link> is a
+# VOID element in HTML, so RSS item URLs silently vanish. DonSeTch rewrites
+# <link> → <rsslink> before parsing for exactly this reason (EVALUATED_TOOLS
+# §5c); we port the idea. Detection is a conservative body sniff because
+# _fetch returns the body without content-type headers.
+
+_FEED_MAX_ITEMS = 60      # [donsetch] verified constant
+_FEED_SUMMARY_CAP = 700   # [ours] chars per item summary after tag-strip
+
+
+def _is_feed(body):
+    """True when the payload looks like RSS 2.0 / Atom / JSON Feed.
+
+    Conservative first-512-char window (1024 for JSON): an HTML page that
+    merely mentions "<rss" in a code sample later in the body does not fire,
+    and XHTML pages (which also start with <?xml) carry <html>, not
+    <rss>/<feed>. Fail-open: any error → False (normal ladder handles it).
+    """
+    try:
+        if not body or not isinstance(body, str):
+            return False
+        head = body.strip("\ufeff \t\r\n")[:1024].lower()
+        if not head:
+            return False
+        if head[0] == "{":
+            return "jsonfeed.org" in head
+        if head.startswith("<!doctype html") or "<html" in head[:200]:
+            return False
+        window = head[:512]
+        if "<rss" in window:
+            return True
+        if "<feed" in window and "xml" in window:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _feed_to_page(body, url, max_chars=MAX_CHARS, max_links=50):
+    """Render a feed document as a page dict (same contract as visit_website).
+
+    Item fields: title; link ← RSS <link> text (rewritten to <rsslink>) or
+    Atom link@href, fallback guid; date ← pubDate|published|updated|dc:date
+    kept RAW (no date parsing — honest and dependency-free); summary ←
+    content:encoded|description|summary|content with tags stripped and
+    capped. Caps: _FEED_MAX_ITEMS per feed, _FEED_SUMMARY_CAP per item,
+    max_chars overall. Fail-open: None when nothing parseable (the caller
+    falls through to the normal ladder).
+    """
+    try:
+        low = body.lstrip("\ufeff \t\r\n")
+        title = ""
+        items = []          # (item_title, link, date, summary)
+        truncated = False
+        if low[:1] == "{":
+            data = json.loads(low)
+            title = (data.get("title") or "").strip()
+            raw_items = data.get("items") or []
+            truncated = len(raw_items) > _FEED_MAX_ITEMS
+            for it in raw_items[:_FEED_MAX_ITEMS]:
+                summ = (it.get("content_text") or it.get("summary")
+                        or it.get("content_html") or "")
+                items.append(((it.get("title") or "").strip(),
+                              it.get("url") or "",
+                              (it.get("date_published")
+                               or it.get("date_modified") or ""),
+                              str(summ)[:_FEED_SUMMARY_CAP]))
+        else:
+            # RSS <link>text</link> is void-mangled by HTML parsers → rewrite
+            # to a non-void tag before parsing ([donsetch] verified hack).
+            xml = body.replace("<link", "<rsslink").replace("</link>",
+                                                            "</rsslink>")
+            soup = BeautifulSoup(xml, "html.parser")
+            entries = soup.find_all("item") + soup.find_all("entry")
+            truncated = len(entries) > _FEED_MAX_ITEMS
+            chan = soup.find("channel") or soup.find("feed")
+            if chan is not None:
+                t = chan.find("title")
+                title = (t.get_text() if t is not None else "").strip()
+            for it in entries[:_FEED_MAX_ITEMS]:
+                t = it.find("title")
+                it_title = (t.get_text() if t is not None else "").strip()
+                link = ""
+                ln = it.find("rsslink")
+                if ln is not None:
+                    link = (ln.get("href") or ln.get_text() or "").strip()
+                if not link:
+                    g = it.find("guid")
+                    if g is not None:
+                        link = (g.get_text() or "").strip()
+                date_el = (it.find("pubdate") or it.find("published")
+                           or it.find("updated") or it.find("dc:date"))
+                date = (date_el.get_text() if date_el is not None else "").strip()
+                summ_el = (it.find("content:encoded")
+                           or it.find("description")
+                           or it.find("summary") or it.find("content"))
+                summ = (summ_el.get_text()
+                        if summ_el is not None else "").strip()
+                items.append((it_title, link, date, summ[:_FEED_SUMMARY_CAP]))
+        if not items and not title:
+            return None
+        parts = []
+        for it_title, link, date, summ in items:
+            block = f"## {it_title}" if it_title else "## (untitled)"
+            meta = " · ".join(x for x in (date, link) if x)
+            if meta:
+                block += f"\n\n{meta}"
+            if summ:
+                block += f"\n\n{summ}"
+            parts.append(block)
+        text = "\n\n---\n\n".join(parts)
+        if truncated:
+            text += (f"\n\n*(feed truncated: showing {_FEED_MAX_ITEMS}"
+                     " of more items)*")
+        published = ""
+        for _, _, date, _ in items:
+            if date:
+                published = date     # feeds are newest-first
+                break
+        return {
+            "title": title or url,
+            "headings": {},
+            "links": [{"url": link, "text": it_title}
+                      for it_title, link, _, _ in items if link][:max_links],
+            "images": [],
+            "content": text[:max_chars],
+            "published": published,
+            "source": "feed",
+            "url": url,
+        }
+    except Exception:
+        return None
+
+
 def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_images=20, cookies=None):
     """
     Full visit flow with all bypass mechanisms.
@@ -890,7 +1025,17 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
     # User-supplied cookies go ONLY to this rung (the target host itself);
     # the Jina/Wayback fallbacks below are third-party domains.
     html = _fetch(url, cookies=cookies)
-    
+
+    # Feed fast path: an RSS/Atom/JSON-Feed document is not a web page —
+    # the HTML parser mangles its XML (void <link> drops every item URL), so
+    # render it as a feed instead (DonSeTch-inspired, EVALUATED_TOOLS §5c).
+    # Applies to the DIRECT fetch only; Jina/Wayback results are excluded.
+    if _is_feed(html):
+        feed_page = _feed_to_page(html, url, max_chars, max_links)
+        if feed_page:
+            return feed_page
+        # Unparseable feed → fall through to the normal ladder.
+
     if not html:
         pass  # fallthrough to Jina
     else:

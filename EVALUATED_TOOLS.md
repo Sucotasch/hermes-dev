@@ -190,9 +190,18 @@ Candidates surfaced by the five-repo review (§4/§5); wall memory shipped 2026-
   first (§5d): JSON output carries no cookies, `--eval` cannot see HttpOnly, and
   `--profile-dir` persistence fails in the sandbox — so this must be prototyped
   in the standalone chain, and the CDP path is UNCERTAIN.
-- [ ] **Feed/RSS extraction** — first-class RSS 2.0 / Atom / JSON Feed path
-  (`MAX_ITEMS=60`, `<link>`→`<rsslink>` rewrite). We have zero feed support;
-  relevant to `news` queries and blocked-but-syndicated sources.
+- [x] **Feed/RSS extraction** — first-class RSS 2.0 / Atom / JSON Feed path
+  shipped in `visit_website_enhanced.py`: `_is_feed` conservative first-512-char
+  body sniff (no content-type — `_fetch` returns body only; XHTML excluded,
+  late `<rss` mentions in code samples do not fire), `_feed_to_page` renders
+  items as readable text with the `<link>`→`<rsslink>` rewrite ([donsetch]
+  verified hack — void `<link>` drops every RSS item URL in HTML parsers),
+  dates kept raw, tags stripped, `_FEED_MAX_ITEMS=60` [donsetch] +
+  `_FEED_SUMMARY_CAP=700` [ours], fail-open to the normal ladder. Applies to
+  the direct fetch rung only. Verified live through the bridge on
+  hnrss.org/frontpage: `source=feed`, 8000 chars, 20 item links. Tests:
+  `plugins/web-tools/ddg/test_feed_parse.py` (10 passed, incl. the
+  void-`<link>` regression case).
 - [ ] **Conditional revalidation (304)** — `If-None-Match`/`If-Modified-Since`
   for the strong-read (6 h) and search (1 h) cache tiers only; skip
   `Vary: *` / `no-store|private`, clamp `max-age` to ≤3600 s.
