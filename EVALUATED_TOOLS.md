@@ -150,14 +150,19 @@ Priority-ordered. Implemented items are marked.
 - [ ] **Offline Wikipedia (.zim) backend** — optional offline fact layer.
 - [ ] **Page-memory / since_last** — fetch fingerprint + diff (lower priority).
 
-Candidates surfaced by the five-repo review (§4/§5); none started, none approved:
+Candidates surfaced by the five-repo review (§4/§5); wall memory shipped 2026-10:
 
-- [ ] **Persistent wall memory + backoff** — disk-backed per-host
+- [x] **Persistent wall memory + backoff** — disk-backed per-host
   `verdict/rung/boxed_until` beside the bridge cache, so a wall that beat us is
-  not re-paid every run. Copy donsetch's numbers (`BASE_DELAY=200 ms`,
+  not re-paid every run. donsetch-verified numbers copied (`BASE_DELAY=200 ms`,
   `MAX_BACKOFF_RUNG=6`, 7 s ladder cap, jitter 0.75–1.25, `rung+2` on 429/503,
-  `rung-1` on success, 7 d TTL, 2000-host cap). ~140 lines in one new module.
-  **Cheapest real win; works inside the sandbox.**
+  `rung-1` on success, 7 d TTL, 2000-host cap); the long wall-box ladder
+  (15 m → 2 h cap) is our own tuning — donsetch's verified code has only the
+  short throttle ladder. Shipped: `plugins/web-tools/ddg/wall_memory.py` +
+  `webtools_bridge.py` wiring (read gate, mfetch notes, fail-open import,
+  kill switch `HERMES_WALL_MEMORY=0`, tests in
+  `plugins/web-tools/ddg/test_wall_memory.py`). Phase 2 (pipeline integration
+  into `_check_url_live` / the validation pool) still pending, separate review.
 - [ ] **Cookie file support** — `--cookies cookies.txt` (Netscape) plumbed into
   the existing, currently unused `_fetch(cookies=...)` seam. Import only; unlocks
   gated/rate-capped sources. ~40 lines.

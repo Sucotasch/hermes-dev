@@ -60,6 +60,71 @@ SEARCH_TTL = 1 * 3600        # 1 hour
 EXPAND_TTL = 1 * 3600        # 1 hour
 IMAGE_TTL = 30 * 60          # 30 min
 
+# ── Wall memory (optional, fail-open) ───────────────────────────────────────
+# Persistent per-domain wall state (plugins/web-tools/ddg/wall_memory.py): a
+# host that keeps serving anti-bot shells is boxed, so the next call answers
+# honestly in milliseconds (error "wall.cooldown" + retry_after) instead of
+# paying a full doomed round-trip. Wayback recovery stays open either way.
+# Kill switch: HERMES_WALL_MEMORY=0 disables it (A/B lever).
+_WALL_MEM = None
+_WALL_TRIED = False
+
+
+def _wall():
+    """Lazy fail-open accessor for wall_memory; None ⇒ every caller no-ops.
+
+    Loaded through sys.path (PLUGIN_DIR is inserted by _load_wrapper too);
+    any failure leaves _WALL_MEM at None and the bridge behaves as before.
+    """
+    global _WALL_MEM, _WALL_TRIED
+    if not _WALL_TRIED:
+        _WALL_TRIED = True
+        try:
+            if str(PLUGIN_DIR) not in sys.path:
+                sys.path.insert(0, str(PLUGIN_DIR))
+            import wall_memory
+            _WALL_MEM = wall_memory
+        except Exception:
+            _WALL_MEM = None
+    return _WALL_MEM
+
+
+def _wall_host(url):
+    try:
+        return urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _wall_gate(url):
+    """(allowed, wait_s, reason) for the URL's host; fail-open to allowed."""
+    wm = _wall()
+    if wm is None:
+        return True, 0.0, None
+    try:
+        return wm.gate(_wall_host(url))
+    except Exception:
+        return True, 0.0, None
+
+
+def _wall_note(url, kind, verdict=None):
+    """Record a fetch outcome; kind is "ok" | "throttled" | "wall"."""
+    wm = _wall()
+    if wm is None:
+        return
+    try:
+        host = _wall_host(url)
+        if not host:
+            return
+        if kind == "ok":
+            wm.note_ok(host)
+        elif kind == "throttled":
+            wm.note_throttled(host)
+        else:
+            wm.note_wall(host, verdict)
+    except Exception:
+        pass
+
 # ── Newer impersonation targets ────────────────────────────────────────────
 # curl_cffi 0.14.0 supports up to chrome142 and safari260. The repo's default
 # pool (chrome110-124) is lagging; newer fingerprints reduce Cloudflare blocks.
@@ -385,11 +450,30 @@ def cmd_read(mod, args):
         if cached is not None:
             return cached
 
-    # Step 1: direct fetch via the Hermes pipeline
-    page = mod.visit_website_enhanced(args.url, max_chars=args.max_chars)
+    # Wall memory (fail-open, see _wall()): a host that recently served us
+    # anti-bot shells is boxed — skip the doomed live fetch and answer honestly
+    # in milliseconds. The Wayback recovery below stays open either way: a box
+    # means "stop hammering the live host", not "no answer".
+    w_allowed, w_wait, _ = _wall_gate(args.url)
+    live_blocked_by_wall = not w_allowed
+    if not live_blocked_by_wall and w_wait > 0:
+        time.sleep(w_wait)  # throttle ladder (recent 429/503), capped at 7 s
+    if live_blocked_by_wall:
+        page = {"url": args.url, "title": args.url, "text": "", "source": "failed"}
+    else:
+        # Step 1: direct fetch via the Hermes pipeline
+        page = mod.visit_website_enhanced(args.url, max_chars=args.max_chars)
     source = page.get("source", "")
     body = page.get("text") or page.get("content") or ""
     chars = len(body)
+    # Live-attempt evidence for the wall memory, captured before the wayback
+    # fallback overwrites page/body with archived content.
+    live_kind = None
+    if not live_blocked_by_wall and source != "failed":
+        if _is_challenge_text(body):
+            live_kind = _challenge_kind(body) or "generic"
+        elif _is_login_gate(body):
+            live_kind = "login"
 
     # Step 2: Wayback fallback when direct failed, returned weak content,
     # or returned an anti-bot challenge shell.
@@ -425,6 +509,22 @@ def cmd_read(mod, args):
         result["blocked"] = _challenge_kind(body) or "generic"
     elif source != "wayback" and _is_login_gate(body):
         result["blocked"] = "login"
+
+    # Wall memory bookkeeping (fail-open): box repeat offenders, clear on real
+    # content. Transport failures (DNS/timeout/404) never create state — a
+    # refused request is never evidence that the page is gone.
+    if live_blocked_by_wall:
+        if source != "wayback":
+            result["error"] = "wall.cooldown"
+            result["retry_after"] = round(w_wait)
+            result["next_action"] = ("host is boxed after repeated anti-bot "
+                                     f"walls; retry in ~{int(w_wait)}s or read "
+                                     "another source")
+    elif live_kind:
+        _wall_note(args.url, "wall", live_kind)
+    elif source not in ("failed", "wayback") and chars >= 500:
+        _wall_note(args.url, "ok")
+
     if source == "wayback":
         result["wayback_ts"] = wb_ts
         result["wayback_snapshot"] = snap_url
@@ -707,6 +807,8 @@ def cmd_mfetch(mod, args):
                 "challenge": True,
                 "blocked": _challenge_kind(text) or "generic",
             }
+            # Even the browser tier hit the wall — strongest wall signal.
+            _wall_note(args.url, "wall", result["blocked"])
         else:
             result = {
                 "url": args.url,
@@ -715,6 +817,8 @@ def cmd_mfetch(mod, args):
                 "chars": rendered["chars"],
                 "text": text,
             }
+            # Live content came back: the host is not walled right now.
+            _wall_note(args.url, "ok")
         if not args.no_cache:
             _cache_put("mfetch", cache_key, result)
         return result

@@ -29,6 +29,9 @@ node_modules/
 # External reference sources downloaded for study (scratch, never committed)
 .refs/
 
+# wall_memory tests: hermetic per-test state dirs (created and removed)
+.wall_test_state/
+
 # Moli headless browser (vendored binary ~97 MB)
 # Copy from the extracted release zip to moli/moli.exe:
 #   Copy-Item "$src\moli.exe" "moli\moli.exe"
