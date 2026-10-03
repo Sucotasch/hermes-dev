@@ -2062,6 +2062,128 @@ _SCORE_STOP_WORDS = {
 }
 
 
+# ── Authority & coverage placement factors ──────────────────────────────────
+# Sort-only multipliers (donsetch-inspired, EVALUATED_TOOLS §5c; AGPL project,
+# ideas only, no code copied). They REORDER results; the relevance VALUES and
+# every threshold consuming them (relevant_alive, aspect logic, compose) are
+# untouched — the pool attaches `authority_factor` and the final sort uses
+# relevance × factor. Kill switch: HERMES_AUTHORITY=0 → always 1.0 (A/B lever).
+#
+# Honest scope note: donsetch's news-freshness tiers are NOT portable — DDG
+# snippets carry no publication dates and htmldate dates arrive only at
+# deep-read time, too late for ranking. Version/year evidence uses the short
+# window (title+snippet+URL, as in donsetch) to dodge footer-copyright noise;
+# anchors are checked against the full page text too (content words, not
+# boilerplate).
+
+_AUTHORITY_OFFICIAL_MULT = 1.6    # [donsetch] verified
+_AUTHORITY_DOCS_MULT = 1.15       # [donsetch] verified
+_AUTHORITY_PAPER_MULT = 1.35      # [donsetch] verified
+_AUTHORITY_PHRASE_MULT = 1.15     # [donsetch] verified
+_COVERAGE_MISS_PENALTY = 0.3      # [donsetch] verified
+
+# [ours] small, unambiguous seed table: query token → official hosts. A
+# missed boost is free; a misfired one reorders junk — so entries must be
+# unambiguous product names, token-matched (word boundary) so "go" never
+# fires inside "django".
+_AUTHORITY_OFFICIAL = {
+    "python": ("python.org", "docs.python.org", "pypi.org"),
+    "rust": ("rust-lang.org", "doc.rust-lang.org", "crates.io"),
+    "kubernetes": ("kubernetes.io",),
+    "docker": ("docker.com", "docs.docker.com"),
+    "postgresql": ("postgresql.org",),
+    "postgres": ("postgresql.org",),
+    "mysql": ("mysql.com", "dev.mysql.com"),
+    "react": ("react.dev", "reactjs.org"),
+    "nodejs": ("nodejs.org",),
+    "node": ("nodejs.org",),
+    "golang": ("go.dev", "golang.org"),
+    "go": ("go.dev", "golang.org"),
+    "typescript": ("typescriptlang.org",),
+    "linux": ("kernel.org",),
+    "git": ("git-scm.com",),
+    "nginx": ("nginx.org",),
+}
+_AUTHORITY_PAPER_HOSTS = ("arxiv.org", "dl.acm.org", "ieee.org",
+                          "springer.com", "sciencedirect.com", "nature.com",
+                          "pubmed.ncbi.nlm.nih.gov")
+_DOCS_WORDS = ("docs", "doc", "documentation", "документация",
+               "документацию", "reference", "справочник", "tutorial",
+               "руководство", "guide", "manual")
+_PAPER_WORDS = ("paper", "papers", "arxiv", "study", "studies", "research",
+                "исследование", "исследования", "journal", "patent")
+_DOCS_PATH_HINTS = ("/docs", "/documentation", "/reference", "/manual",
+                    "/tutorial", "docs.", "developer.")
+_AUTHORITY_VERSION_RE = re.compile(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b")
+_AUTHORITY_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _authority_coverage_factor(query, title, url, snippet="", text=""):
+    """Sort-only placement multiplier for one result. Fail-open → 1.0.
+
+    Boosts: official host for a query token ×1.6 (once); docs-shaped URL
+    when the query seeks documentation ×1.15; paper host when the query
+    seeks papers ×1.35; the full query phrase in the title ×1.15.
+    Penalties (coverage): a hyphenated query anchor absent from the
+    title/snippet/URL/page-text (hyphen, spaced and concatenated variants
+    all count as covered) ×0.3; a version specifier whose major is
+    contradicted by the short evidence ×0.3; a year in the query
+    contradicted by a different year in the short evidence ×0.3.
+    """
+    try:
+        if os.environ.get("HERMES_AUTHORITY", "1") != "1":
+            return 1.0
+        if not query or not url:
+            return 1.0
+        q_low = " ".join(str(query).lower().split())
+        tokens = set(re.findall(r"\w+", q_low))
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower()
+        u_low = str(url).lower()
+        title_low = (title or "").lower()
+        short_ev = " ".join((title_low, (snippet or "").lower(), u_low))
+        full_ev = short_ev + " " + (text or "").lower()[:4000]
+        factor = 1.0
+
+        # ── boosts ──
+        for tok, hosts in _AUTHORITY_OFFICIAL.items():
+            if tok in tokens and any(host == h or host.endswith("." + h)
+                                     for h in hosts):
+                factor *= _AUTHORITY_OFFICIAL_MULT
+                break
+        if any(w in tokens for w in _DOCS_WORDS) and \
+                any(h in u_low for h in _DOCS_PATH_HINTS):
+            factor *= _AUTHORITY_DOCS_MULT
+        if any(w in tokens for w in _PAPER_WORDS) and \
+                any(host == h or host.endswith("." + h)
+                    for h in _AUTHORITY_PAPER_HOSTS):
+            factor *= _AUTHORITY_PAPER_MULT
+        if len(q_low) > 3 and q_low in title_low:
+            factor *= _AUTHORITY_PHRASE_MULT
+
+        # ── coverage penalties ──
+        anchors = {a for a in re.findall(r"\w+(?:-\w+)+", q_low)}
+        for a in anchors:
+            covered = (a in full_ev or a.replace("-", " ") in full_ev
+                       or a.replace("-", "") in full_ev)
+            if not covered:
+                factor *= _COVERAGE_MISS_PENALTY
+        q_vers = _AUTHORITY_VERSION_RE.findall(q_low)
+        if q_vers:
+            q_majors = {v[0] for v in q_vers}
+            r_majors = {v[0] for v in _AUTHORITY_VERSION_RE.findall(short_ev)}
+            if r_majors and not (r_majors & q_majors):
+                factor *= _COVERAGE_MISS_PENALTY
+        q_years = set(_AUTHORITY_YEAR_RE.findall(q_low))
+        if q_years:
+            r_years = set(_AUTHORITY_YEAR_RE.findall(short_ev))
+            if r_years and not (r_years & q_years):
+                factor *= _COVERAGE_MISS_PENALTY
+        return round(factor, 3)
+    except Exception:
+        return 1.0
+
+
 def content_relevance_score(query, text):
     """Score how relevant a page's text content is to the query.
 
@@ -2422,6 +2544,11 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
                 res_out['text'] = text[:4000]
 
                 res_out['relevance'] = round(_relevance_score(query, title, text), 2)
+                # Authority/coverage placement factor — SORT ONLY. relevance
+                # itself is untouched, so every downstream threshold
+                # (relevant_alive, aspects, compose) sees identical values.
+                res_out['authority_factor'] = _authority_coverage_factor(
+                    query, title, url, res.get('snippet', ''), text)
 
                 image_count = len(re.findall(r'<img[^>]+src=', body_html))
                 res_out['image_count'] = image_count
@@ -2469,8 +2596,12 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
         "elapsed": elapsed,
     }
     
-    # Add top-level flat results (sorted by relevance)
-    validated.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+    # Add top-level flat results (sorted by relevance × authority_factor —
+    # ORDER ONLY: relevance values themselves are unchanged, so every
+    # downstream threshold is untouched; factor defaults to 1.0 when absent).
+    validated.sort(
+        key=lambda x: x.get("relevance", 0) * x.get("authority_factor", 1.0),
+        reverse=True)
     result["results"] = validated
     
     if compose:

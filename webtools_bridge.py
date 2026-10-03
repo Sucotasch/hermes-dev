@@ -385,6 +385,7 @@ def cmd_search(mod, args):
             "title": r.get("title"),
             "alive": r.get("alive"),
             "relevance": r.get("relevance"),
+            "authority_factor": r.get("authority_factor"),
             "source_query": args.query,
             "text": (r.get("text") or r.get("snippet") or "")[:1200],
         })

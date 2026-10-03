@@ -205,9 +205,22 @@ Candidates surfaced by the five-repo review (§4/§5); wall memory shipped 2026-
 - [ ] **Conditional revalidation (304)** — `If-None-Match`/`If-Modified-Since`
   for the strong-read (6 h) and search (1 h) cache tiers only; skip
   `Vary: *` / `no-store|private`, clamp `max-age` to ≤3600 s.
-- [ ] **Authority + coverage penalties** — official/depth multipliers, a news
-  freshness table, and entity/version/year coverage penalties (pure regex, no
-  dependencies).
+- [x] **Authority + coverage penalties** — official/depth multipliers and
+  entity/version/year coverage penalties, shipped as a SORT-ONLY placement
+  factor in `ddg_search.py` (`_authority_coverage_factor`, attached as
+  `authority_factor`, final sort uses `relevance × factor`): official host
+  ×1.6, docs-shape when docs-seeking ×1.15, paper host when paper-seeking
+  ×1.35, phrase-in-title ×1.15 (all [donsetch] verified); anchor/version/
+  year coverage misses ×0.3 ([donsetch] verified). Relevance VALUES and
+  every threshold (relevant_alive, aspects, compose) untouched by design.
+  [ours] adaptations: small unambiguous official-host seed table;
+  docs/paper word lists bilingual (RU/EN); version/year evidence is the
+  short window (title+snippet+URL) to dodge footer noise; anchors check
+  the page text too. Honest gaps: donsetch's news-freshness tiers are NOT
+  portable (DDG snippets carry no dates; htmldate arrives post-ranking) —
+  documented, skipped. Kill switch `HERMES_AUTHORITY=0`. Tests:
+  `plugins/web-tools/ddg/test_authority.py` (incl. the deterministic
+  before/after ordering comparison).
 
 ## 4. Five-repo reuse review (2026-09)
 
