@@ -295,15 +295,33 @@ Empirically verified, because the handoff design depends on it:
 - `--cookie-file` (Netscape) is an **import** path and works (verified: an
   imported `test_cookie=probe_value` was replayed).
 - `--profile-dir` writes `profile.json` declaring a JSON cookie backend at
-  `partitions/default/cookies.json` — a plausible harvest path, BUT in the DSH
-  sandbox profile init fails every time: `failed to sync profile manifest
-  parent directory … os error 5` (also with `danger-full-access`). So
-  persistence is **not verifiable in the sandbox**; it must be tested in the
-  standalone (unsandboxed) chain — exactly the argument for running this
-  experiment outside the sandbox.
-- `moli serve` exposes a CDP-shaped endpoint (default port 9222) and
-  `moli --version`/`fetch --help` confirm it; a `/json/version` probe hung in
-  the sandbox, so the exact CDP cookie method remains UNCERTAIN.
+  `partitions/default/cookies.json`, BUT profile init **fails every time in the
+  DSH sandbox**: `failed to sync profile manifest parent directory … os error 5`
+  (also with `danger-full-access`). The on-disk cookie file was never created.
+  So the profile route is not usable here — and is no longer needed (next bullet).
+- ✅ **RESOLVED — `moli serve` IS a real CDP endpoint, and CDP harvest works
+  in-sandbox.** Measured (`Network.enable` → `Page.navigate` → cookie calls):
+  - `/json/version` → `{"Browser":"Chrome/145.0.0.0","Protocol-Version":"1.3"}`;
+    `/json/list` → a live page target `moli-default` with a
+    `webSocketDebuggerUrl` (ws://127.0.0.1:<port>/devtools/page/moli-default).
+  - `Network.getCookies`, `Network.getAllCookies` **and** `Storage.getCookies`
+    all returned the **HttpOnly** cookie in full:
+    `{"name":"cf_clearance","value":"…","domain":…,"path":"/","expires":…,`
+    `"httpOnly":true,"secure":false,"session":false,"sourceScheme":…,"sourcePort":…}`.
+  - `Runtime.evaluate("document.cookie")` returned only the non-HttpOnly cookie —
+    direct proof that the CDP route is *required* for clearance cookies.
+  - The whole spike ran inside the DSH sandbox over loopback HTTP, with **no
+    `--profile-dir`** — so the `os error 5` blocker above does not apply to this
+    route. Python clients are present: `websocket-client` 1.8.0, `websockets` 10.4.
+- ⚠️ **The remaining gap is "solve", not "bounce".** Harvest + injection are now
+  both verified feasible; what is still missing is a mechanism that *clears a
+  real Cloudflare/DataDome challenge* to produce a clearance cookie worth
+  harvesting. `moli fetch` does NOT do it (§3: returns the «Just a moment…»
+  interstitial on stackoverflow.com, same as curl_cffi). A CDP-driven solve
+  (click a Turnstile checkbox via `Input.dispatchMouseEvent`, poll for the DOM to
+  clear, then harvest) is *expressible* with this endpoint and mirrors donsetch's
+  click loop — but whether it defeats a live challenge is UNVERIFIED and needs a
+  real-wall test outdoors.
 
 ## 6. MCP (Model Context Protocol) — reference notes for possible future use
 
