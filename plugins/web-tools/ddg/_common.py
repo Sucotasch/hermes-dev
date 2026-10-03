@@ -8,6 +8,7 @@ Shared URL-hygiene helpers (ported from Temp/web-media-parser/src/parser/utils.p
 """
 
 import re
+import time
 from urllib.parse import urlparse, parse_qsl, urlencode
 
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
@@ -221,3 +222,129 @@ def consent_cookie_header(url):
         return "; ".join(f"{k}={v}" for k, v in CONSENT_COOKIES.items())
     except Exception:
         return None
+
+
+# ── Netscape cookies.txt support (user-supplied session cookies) ───────────
+# Lets a caller send real login/age-gate/session cookies from a browser export
+# alongside a fetch. Jar semantics follow donsetch (EVALUATED_TOOLS §5a):
+# RFC 6265 domain/path matching, Secure cookies never replay over plain HTTP,
+# longest path first, header capped at 50 pairs / 4096 bytes. Fail-open: any
+# error or empty match yields "" (the request proceeds without cookies).
+
+MAX_COOKIE_HEADER_PAIRS = 50
+MAX_COOKIE_HEADER_BYTES = 4096
+
+
+def parse_netscape_cookies(text):
+    """Parse cookies.txt (Netscape format) content into a list of dicts.
+
+    Line format (TAB-separated):
+        domain <TAB> include_subdomains <TAB> path <TAB> secure <TAB> expires <TAB> name <TAB> value
+    A "#HttpOnly_" prefix marks an HttpOnly cookie — the prefix is honored and
+    stripped (an HttpOnly cookie is still sendable in a Cookie request
+    header). Other "#" lines are comments. Lines without 7 TAB fields are
+    retried leniently with whitespace splitting (the value keeps internal
+    spaces). Fail-open: malformed input yields the cookies parsed so far.
+    """
+    jar = []
+    try:
+        for raw in (text or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            elif line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                parts = line.split(None, 6)      # lenient: any whitespace
+            if len(parts) < 7:
+                continue
+            domain, _flag, path, secure, expires, name, value = parts[:7]
+            domain = domain.strip().lower()
+            name = name.strip()
+            if not domain or not name:
+                continue
+            try:
+                expires_at = float(str(expires).strip() or 0)
+            except (TypeError, ValueError):
+                expires_at = 0.0                 # unreadable = session cookie
+            jar.append({
+                "domain": domain,
+                "path": path.strip() or "/",
+                "secure": str(secure).strip().lower() == "true",
+                "expires": expires_at,
+                "name": name,
+                "value": value,
+            })
+    except Exception:
+        return jar
+    return jar
+
+
+def cookie_header_for(jar, url, now=None):
+    """Build a `Cookie` header value for ``url`` from a parsed jar.
+
+    Matching rules (RFC 6265 §5.1.4, simplified; donsetch jar semantics):
+      * domain — exact host match, or a dot-leading domain matches the host
+        suffix on a dot boundary (".example.com" matches "example.com" and
+        "a.example.com", never "notexample.com");
+      * path — cookie path prefixes the URL path on a "/" boundary
+        ("/" matches everything);
+      * Secure cookies are NEVER sent over plain HTTP (the secure-cookie-leak
+        invariant, enforced here rather than trusted to the caller);
+      * expired cookies are dropped (expires <= 0 means session: keep);
+      * longest cookie path first, capped at MAX_COOKIE_HEADER_PAIRS /
+        MAX_COOKIE_HEADER_BYTES (first overflow stops the header).
+    Fail-open: "" when nothing matches or anything errors.
+    """
+    try:
+        if not jar or not url:
+            return ""
+        parsed = urlparse(str(url))
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or "/"
+        is_https = (parsed.scheme or "").lower() == "https"
+        now = time.time() if now is None else now
+        picked = []
+        for c in jar:
+            if not isinstance(c, dict):
+                continue
+            dom = str(c.get("domain") or "").lower()
+            if not dom:
+                continue
+            if dom.startswith("."):
+                if not (host == dom[1:] or host.endswith(dom)):
+                    continue
+            elif host != dom:
+                continue
+            try:
+                exp = float(c.get("expires") or 0)
+            except (TypeError, ValueError):
+                exp = 0.0
+            if exp > 0 and exp <= now:
+                continue
+            if c.get("secure") and not is_https:
+                continue
+            cpath = str(c.get("path") or "/")
+            if cpath != "/":
+                boundary = cpath if cpath.endswith("/") else cpath + "/"
+                if not (path == cpath or path.startswith(boundary)):
+                    continue
+            picked.append(c)
+        picked.sort(key=lambda c: len(str(c.get("path") or "/")), reverse=True)
+        pairs = []
+        total = 0
+        for c in picked:
+            if len(pairs) >= MAX_COOKIE_HEADER_PAIRS:
+                break
+            pair = f"{c['name']}={c.get('value') or ''}"
+            extra = len(pair) + (2 if pairs else 0)   # "; " separator
+            if total + extra > MAX_COOKIE_HEADER_BYTES:
+                break
+            pairs.append(pair)
+            total += extra
+        return "; ".join(pairs)
+    except Exception:
+        return ""

@@ -163,9 +163,20 @@ Candidates surfaced by the five-repo review (§4/§5); wall memory shipped 2026-
   kill switch `HERMES_WALL_MEMORY=0`, tests in
   `plugins/web-tools/ddg/test_wall_memory.py`). Phase 2 (pipeline integration
   into `_check_url_live` / the validation pool) still pending, separate review.
-- [ ] **Cookie file support** — `--cookies cookies.txt` (Netscape) plumbed into
-  the existing, currently unused `_fetch(cookies=...)` seam. Import only; unlocks
-  gated/rate-capped sources. ~40 lines.
+- [x] **Cookie file support** — `--cookies cookies.txt` (Netscape) plumbed into
+  the previously unused `_fetch(cookies=...)` seam. Shipped: parser +
+  RFC 6265 matcher in `_common.py` (`parse_netscape_cookies`,
+  `cookie_header_for`: domain/path matching, `Secure` never over HTTP,
+  longest-path-first, 50-pair/4096-byte caps — donsetch jar semantics),
+  `visit_website(..., cookies=None)` forwards to the direct curl_cffi rung
+  only (Jina/Wayback never see site cookies), bridge flag `--cookies` wires
+  read/probe/render/mfetch. `#HttpOnly_` prefix honored, BOM-safe, fail-open.
+  Verified live end-to-end against a local echo server: the direct fetch
+  carries the cookie (`bridge_probe=ok123` round-tripped). Known pre-existing
+  quirk: htmldate's `find_date(url, html)` refetches the URL via urllib3 for
+  date metadata WITHOUT user cookies — metadata-only, fail-open, no leakage;
+  phase-2 gating will cover both requests. Tests:
+  `plugins/web-tools/ddg/test_cookie_file.py` (16 passed).
 - [ ] **Browser→HTTP cookie handoff (solve-and-bounce)** — harvest clearance
   cookies after a Moli solve and replay them in the HTTP tier. Needs a spike
   first (§5d): JSON output carries no cookies, `--eval` cannot see HttpOnly, and

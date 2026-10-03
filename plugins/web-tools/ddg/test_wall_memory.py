@@ -201,7 +201,7 @@ class _FakeMod:
         self.text = text
         self.calls = []
 
-    def visit_website_enhanced(self, url, max_chars=8000):
+    def visit_website_enhanced(self, url, max_chars=8000, cookies=None):
         self.calls.append(url)
         return {"url": url, "title": "t", "text": self.text,
                 "source": self.source}
@@ -209,7 +209,7 @@ class _FakeMod:
 
 def _args(url, no_wayback=True):
     return types.SimpleNamespace(url=url, max_chars=8000, no_cache=True,
-                                 no_wayback=no_wayback)
+                                 no_wayback=no_wayback, cookies="")
 
 
 def test_bridge_read_boxed_host_skips_network(state_dir, monkeypatch):
@@ -291,7 +291,7 @@ def test_bridge_mfetch_challenge_notes_wall(state_dir, monkeypatch):
                                                "text": "Just a moment..."})
     args = types.SimpleNamespace(url="http://mf.example/page", max_chars=8000,
                                  no_cache=True, moli_timeout=30.0, proxy=False,
-                                 proxy_url="http://127.0.0.1:2080")
+                                 proxy_url="http://127.0.0.1:2080", cookies="")
     res = bridge.cmd_mfetch(None, args)
     assert res["challenge"] is True
     assert res["blocked"] == "cloudflare"

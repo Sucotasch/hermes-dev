@@ -856,10 +856,14 @@ def _fetch_pdf_text(url, max_bytes=_PDF_MAX_BYTES, max_pages=_PDF_MAX_PAGES):
 
 
 # ── Visit with full bypass ─────────────────────────────────────────────────
-def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_images=20):
+def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_images=20, cookies=None):
     """
     Full visit flow with all bypass mechanisms.
     Returns structured dict with title, headings, links, images, content.
+
+    ``cookies`` (optional) is a pre-built `Cookie` header value forwarded to
+    the direct curl_cffi fetch only; the Jina/Wayback fallbacks are third-party
+    hosts and never see it (cookies never cross domains).
     """
     # ── Step 0: PDF fast path (bounded pypdf extraction, fail-open) ──
     # Only when the URL itself looks like a PDF — before the HTML fetch ladder
@@ -883,7 +887,9 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
         # renders PDFs too, so a plain-HTML-looking PDF URL still has a path).
 
     # ── Step 1: Direct fetch via curl_cffi ──
-    html = _fetch(url)
+    # User-supplied cookies go ONLY to this rung (the target host itself);
+    # the Jina/Wayback fallbacks below are third-party domains.
+    html = _fetch(url, cookies=cookies)
     
     if not html:
         pass  # fallthrough to Jina

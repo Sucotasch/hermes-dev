@@ -125,6 +125,28 @@ def _wall_note(url, kind, verdict=None):
     except Exception:
         pass
 
+
+def _cookie_header_for(cookies_path, url):
+    """Cookie header for ``url`` from a Netscape cookies.txt, or None.
+
+    Fail-open: a missing/unreadable file, a missing _common module or a parse
+    error all yield None (the fetch proceeds without cookies). Cookies are
+    domain/path/secure-matched by _common.cookie_header_for and are sent only
+    on the direct fetch of the target host — never to Jina or Wayback.
+    """
+    if not cookies_path:
+        return None
+    try:
+        if str(PLUGIN_DIR) not in sys.path:
+            sys.path.insert(0, str(PLUGIN_DIR))
+        import _common
+        # utf-8-sig: browser exports often carry a UTF-8 BOM
+        with open(cookies_path, "r", encoding="utf-8-sig", errors="replace") as f:
+            jar = _common.parse_netscape_cookies(f.read())
+        return _common.cookie_header_for(jar, url) or None
+    except Exception:
+        return None
+
 # ── Newer impersonation targets ────────────────────────────────────────────
 # curl_cffi 0.14.0 supports up to chrome142 and safari260. The repo's default
 # pool (chrome110-124) is lagging; newer fingerprints reduce Cloudflare blocks.
@@ -450,6 +472,10 @@ def cmd_read(mod, args):
         if cached is not None:
             return cached
 
+    # Optional user-supplied session cookies (Netscape cookies.txt): matched
+    # to this URL's domain, sent only on the direct fetch below.
+    cookie_header = _cookie_header_for(args.cookies, args.url)
+
     # Wall memory (fail-open, see _wall()): a host that recently served us
     # anti-bot shells is boxed — skip the doomed live fetch and answer honestly
     # in milliseconds. The Wayback recovery below stays open either way: a box
@@ -462,7 +488,8 @@ def cmd_read(mod, args):
         page = {"url": args.url, "title": args.url, "text": "", "source": "failed"}
     else:
         # Step 1: direct fetch via the Hermes pipeline
-        page = mod.visit_website_enhanced(args.url, max_chars=args.max_chars)
+        page = mod.visit_website_enhanced(args.url, max_chars=args.max_chars,
+                                          cookies=cookie_header)
     source = page.get("source", "")
     body = page.get("text") or page.get("content") or ""
     chars = len(body)
@@ -946,6 +973,8 @@ def _build_parser():
     # expand
     ap.add_argument("--urls", default="", help="Comma-separated source URLs (for expand)")
     ap.add_argument("--max-new-links", type=int, default=10, help="Max new links to fetch")
+    ap.add_argument("--cookies", default="",
+                    help="Netscape cookies.txt to load; matching cookies are sent on direct reads (read/probe/render/mfetch)")
     return ap
 
 
