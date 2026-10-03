@@ -124,6 +124,7 @@ $Files = @(
     @{ Repo = 'plugins\web-tools\ddg\evidence_rank.py'; Dest = 'plugins\web-tools\ddg\evidence_rank.py' }
     @{ Repo = 'plugins\web-tools\ddg\compose.py'; Dest = 'plugins\web-tools\ddg\compose.py' }
     @{ Repo = 'plugins\web-tools\ddg\sitemap_seeding.py'; Dest = 'plugins\web-tools\ddg\sitemap_seeding.py' }
+    @{ Repo = 'plugins\web-tools\ddg\wall_memory.py'; Dest = 'plugins\web-tools\ddg\wall_memory.py' }
     @{ Repo = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json'; Dest = 'plugins\web-tools\ddg\resources\Imagus_sieve_2026.07.15_823.json' }
     @{ Repo = 'plugins\web-tools\ddg\resources\junk_allowlist.txt'; Dest = 'plugins\web-tools\ddg\resources\junk_allowlist.txt' }
     @{ Repo = 'skills\restore-context\SKILL.md'; Dest = 'skills\restore-context\SKILL.md' }
@@ -243,6 +244,7 @@ $Targets = @(
     'plugins\web-tools\ddg\evidence_rank.py',
     'plugins\web-tools\ddg\compose.py',
     'plugins\web-tools\ddg\sitemap_seeding.py',
+    'plugins\web-tools\ddg\wall_memory.py',
     'plugins\web-tools\ddg\_coverage.py',
     'plugins\web-tools\ddg\_common.py',
     'hermes-agent\tools\ddg_search_tool.py',

@@ -20,6 +20,14 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 
+# Wall memory — persistent per-domain wall state (same dir, fail-open import;
+# kill switch HERMES_WALL_MEMORY=0). Transport-level reliability only: no
+# topic/query branching anywhere (backend policy-free invariant, AGENTS.md).
+try:
+    import wall_memory as _WALL
+except Exception:
+    _WALL = None
+
 # Load adjacent query_variants helper once at import time to avoid per-call overhead
 _QUERY_VARIANTS_MODULE = None
 try:
@@ -1769,6 +1777,73 @@ def _parse_retry_after(raw):
         return None
 
 
+def _wall_host_of(url):
+    """Hostname for wall-memory keying (fail-open: "" on any error)."""
+    try:
+        return urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _wall_gate_check(url):
+    """Wall-memory gate for the validation pool.
+
+    Returns a synthetic `_check_url_live`-shaped result for a boxed host —
+    honest fast-fail with no network: the caller counts it as blocked, the
+    domain's fails accumulate exactly like a live wall, and the in-run
+    quarantine stays consistent. Or None when the host should be attempted
+    normally. Throttled hosts (rung > 0, a recent 429/503) sleep the ladder
+    wait here (≤ 7 s) so we stay polite to a domain that just throttled us.
+    Fail-open: any error → None (attempt the fetch).
+    """
+    if _WALL is None:
+        return None
+    try:
+        allowed, wait_s, reason = _WALL.gate(_wall_host_of(url))
+        if not allowed:
+            return {
+                "alive": False, "status": None, "content_type": "",
+                "content_length": 0, "text_length": 0, "text_words": 0,
+                "blocked": True, "proxy_used": False,
+                "error": f"wall.cooldown (host boxed; retry in ~{int(wait_s)}s)",
+                "body": None,
+            }
+        if wait_s > 0:
+            time.sleep(wait_s)
+    except Exception:
+        pass
+    return None
+
+
+def _wall_note_check(url, check):
+    """Record a validation outcome into wall memory (fail-open).
+
+    wall != dead: transport failures (DNS/timeout/reset) and 404s never
+    create state — a refused request is not evidence the page is gone.
+      * alive → note_ok (clears a box, decays the throttle rung);
+      * blocked by wall (403/451, or a detected challenge shell on ANY
+        status) → note_wall (boxes the host 15m → 2h);
+      * 429/503 → note_throttled (ladder rung +2, no box — a busy or
+        rate-limiting host is not a wall).
+    """
+    if _WALL is None:
+        return
+    try:
+        host = _wall_host_of(url)
+        if not host:
+            return
+        if check.get("alive"):
+            _WALL.note_ok(host)
+            return
+        status = check.get("status")
+        if check.get("blocked") and status not in (429, 503):
+            _WALL.note_wall(host)
+        elif status in (429, 503):
+            _WALL.note_throttled(host)
+    except Exception:
+        pass
+
+
 def _check_url_live(url, timeout=10):
     """Check if a URL is alive and accessible.
 
@@ -2267,9 +2342,19 @@ def search_deep(query, validate=True, classify=True, max_validate=50,
     batch_size = 10
 
     def _validate_one(item):
-        """Validate a single URL — called in thread pool."""
+        """Validate a single URL — called in thread pool.
+
+        Wall memory (fail-open): a boxed host is answered honestly in
+        milliseconds with no network, throttled hosts wait the ladder first,
+        and every outcome is recorded so the NEXT run skips known walls
+        instead of re-paying them. The hot `_check_url_live` itself is
+        untouched; this is the only integration point.
+        """
         url = item.get("url", "")
-        check = _check_url_live(url, timeout=timeout_per_url)
+        check = _wall_gate_check(url)
+        if check is None:
+            check = _check_url_live(url, timeout=timeout_per_url)
+            _wall_note_check(url, check)
         return item, check
 
     for batch_start in range(0, len(ordered_urls), batch_size):

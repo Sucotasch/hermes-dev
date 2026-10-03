@@ -161,8 +161,16 @@ Candidates surfaced by the five-repo review (§4/§5); wall memory shipped 2026-
   short throttle ladder. Shipped: `plugins/web-tools/ddg/wall_memory.py` +
   `webtools_bridge.py` wiring (read gate, mfetch notes, fail-open import,
   kill switch `HERMES_WALL_MEMORY=0`, tests in
-  `plugins/web-tools/ddg/test_wall_memory.py`). Phase 2 (pipeline integration
-  into `_check_url_live` / the validation pool) still pending, separate review.
+  `plugins/web-tools/ddg/test_wall_memory.py`). Phase 2 shipped:
+  pipeline integration via `_validate_one` (the single `_check_url_live`
+  call site) — gate + notes live in two module helpers (`_wall_gate_check`,
+  `_wall_note_check`), the hot `_check_url_live` is untouched; 429/503 →
+  `note_throttled` (donsetch rung semantics, finally wireable — the pool
+  sees HTTP status), 403/451/challenge-shells → `note_wall`, alive →
+  `note_ok`, transport failures and 404s → no state. `wall_memory.py` added
+  to the restore manifest + compile targets. Deep-read (orchestrator) is
+  deliberately NOT gated: it only fetches URLs that just passed validation.
+  Tests: `plugins/web-tools/ddg/test_wall_pipeline.py`.
 - [x] **Cookie file support** — `--cookies cookies.txt` (Netscape) plumbed into
   the previously unused `_fetch(cookies=...)` seam. Shipped: parser +
   RFC 6265 matcher in `_common.py` (`parse_netscape_cookies`,
