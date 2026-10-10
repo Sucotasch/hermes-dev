@@ -222,7 +222,7 @@ Candidates surfaced by the five-repo review (§4/§5); wall memory shipped 2026-
   `plugins/web-tools/ddg/test_authority.py` (incl. the deterministic
   before/after ordering comparison).
 
-## 4. Five-repo reuse review (2026-09)
+## 4. Reuse review (2026-09; tinyfish-cookbook added 2026-10)
 
 Asked: of `thezveroboy/reddit-dl`, `TheGP/untidetect-tools`,
 `unclecode/crawl4ai`, `soxoj/maigret`, `dondai44423/donsetch` — what is worth
@@ -235,6 +235,7 @@ using in our project? Verdicts, with the reason:
 | `soxoj/maigret` | MIT | **Not adopted.** Far from deep search: it is username→account OSINT over ~6k sites. Its genuinely interesting technique is *false-positive suppression* (`error_detection.py`: site-specific `fail_flags`, then generic bot-protection wording, then status — 403/401/429/999/5xx, with 403 never meaning "username free"). We already have the equivalent shape in `_detect_blocked` + challenge detection, and the 6k-site DB would add noise, not signal. |
 | `thezveroboy/reddit-dl` | none | **Not adopted.** Single-site media downloader. Its one transferable pattern is a user-supplied `cookies.txt` (Reddit caps anonymous requests at 25 posts) — same idea as donsetch's login/cookie vault and the fix for our unused `_fetch(cookies=)`. |
 | `TheGP/untidetect-tools` | none (a list) | **Not adopted.** Curated catalogue, no code: commercial anti-detect browsers, paid captcha solvers, SMS-activation. Conflicts with our zero-API-key, no-account stance; Tier 3 (Playwright/undetected browser) is permanently rejected. Reference only. |
+| `tinyfish-io/tinyfish-cookbook` | MIT | **Service skipped, two prompt-level patterns taken.** The TinyFish API itself is paid/keyed/cloud — same verdict as crawl4ai Cloud MCP. Taken instead: the **doctor-skill pattern** (shipped as the Doctor section in `skills/hermes-web-tools/SKILL.md`; verified by a full end-to-end run, 52.5 s, all checks green, zero recipe friction) and the **research-landscape recipe** (shipped as `skills/research-landscape/SKILL.md`; validated by a live 4-facet investigation — 4/4 facets covered with exactly one bounded retry each, 2 keystone numbers probe-verified, 5 "found live" refinements folded back into v1.1). Their Vault concept additionally confirms our `--cookies` direction. |
 
 Cross-cutting conclusion: the only real capability gaps these repos revealed
 are (a) browser→HTTP **cookie handoff**, (b) **persistent wall memory +
