@@ -200,7 +200,10 @@ Optional flags:
   (Wix/React/Next.js apps that fetch content over the network) — for those it falls back
   to `read`, which is usually equally weak. Verify `source:"deno-render"` before trusting
   the post-JS text.
-- **No headless browser:** JavaScript-rendered SPAs often yield little/no text.
+- **Browser only on demand:** the plain read/render ladder has no browser;
+  `mfetch` (vendored Moli) renders real SPAs, needs `danger-full-access`
+  escalation in this sandbox and does NOT solve JS challenges — for those the
+  Wayback fallback is the answer (see mfetch above).
 - **egress works** (confirmed HTTP 200 from duckduckgo), but some hosts rate-limit;
   repeat calls are cache-protected, `--proxy` adds a retry path via local NecoBox.
 - **NecoBox proxy** (`127.0.0.1:2080`) is local and free: pass `--proxy` when a site
@@ -215,3 +218,43 @@ Optional flags:
 - Need depth/sources across subtopics → run several targeted `search` calls in parallel
   (each with its own `--out`), then synthesize; `expand` finds follow-up links.
 - Never present `chars:0` / `source:"failed"` content as fact.
+
+## Doctor: self-check when the tools misbehave
+When search returns nothing, reads fail repeatedly, or results look systematically
+wrong, run this ladder top-down and report honestly which rung is broken. It uses
+ONLY the existing subcommands — nothing new is installed.
+
+### 0. Environment (no network, ~2 s)
+- Deps present in the invoking Python (no output = OK):
+  `python -c "import curl_cffi, ddgs, httpx, bs4"`.
+- Cache dir writable: `%TEMP%\hermes_web_cache\` exists (create if missing).
+- Wall state: read `%TEMP%\hermes_web_cache\walls.json` if present. An entry with
+  `boxed_until` in the future explains a `read` returning `wall.cooldown` — that is
+  the wall memory working as designed (honest fast-fail, Wayback still open, the box
+  expires by itself). **Never hand-edit the file**; unbox a single host with:
+  `python -c "import sys; sys.path.insert(0, r'd:\Arx\Software Downloads\Hermes copy\hermes-dev\plugins\web-tools\ddg'); import wall_memory as wm; wm.reset('<host>')"`
+
+### 1. Primitive checks (live, ~15–60 s each)
+```powershell
+# search — the engine itself (expect STATUS=OK, count>0)
+python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" search --query "test" --max-validate 3 --out "$env:TEMP\d1.json"
+# read — the fetch ladder (expect STATUS=OK, source=direct, chars>0)
+python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" read --url "https://example.com" --no-cache --out "$env:TEMP\d2.json"
+# probe — claim verification (expect match=true for THIS exact claim: it matches
+# body text, not page titles)
+python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" probe --url "https://example.com" --claim "documentation examples" --no-cache --out "$env:TEMP\d3.json"
+```
+
+### 2. Verdict table
+| Symptom | Meaning | Action |
+|---|---|---|
+| all three ERR | network/proxy environment problem | check egress; retry with `--proxy` |
+| search ERR, read OK | search-engine rate limit | wait, or retry with `--proxy` |
+| read `wall.cooldown` | host boxed by wall memory (by design) | honor `retry_after`; for an A/B rerun the same pwsh call with `$env:HERMES_WALL_MEMORY="0"` before the command |
+| read `challenge`/`blocked` | anti-bot wall | `--proxy` → `render` → `mfetch` |
+| probe `match:false` on real content | claim text genuinely absent from the body | `read` the page; probe is exact-substring on extracted text |
+| ranking looks odd | authority/coverage placement factor | A/B: `$env:HERMES_AUTHORITY="0"` in the same pwsh call |
+| one read took ~16 s | full ladder ran (direct → Jina → Wayback) | normal; repeats hit the disk cache in ~0.5 s |
+
+Env kill-switches do not persist between pwsh calls — set and run in ONE invocation,
+e.g. `$env:HERMES_WALL_MEMORY="0"; python "<bridge>" read --url ... --out ...`.
