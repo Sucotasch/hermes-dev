@@ -191,6 +191,11 @@ Optional flags:
   that were previously unreadable now come back via `source:"wayback"`.
 - **Wayback** only helps when a snapshot exists; exact URLs (e.g. Reddit comment
   threads) are often unarchived — then `source:"failed"` is honest.
+- **Privacy (disclosure):** when the direct fetch is blocked or weak, the read
+  ladder sends the target URL to `r.jina.ai` (a third-party reader proxy);
+  those results are labeled `source:"jina"`. There is no per-call Jina
+  off-switch today — if third-party URL disclosure is unacceptable for a task,
+  use `search` snippets only.
 - **`image` — experimental / noisy in this environment.** Results may include
   off-topic or Bing-redirect thumbnails. Manually verify each image is relevant to the
   query before presenting it; do not treat image hits as authoritative evidence.
@@ -252,6 +257,7 @@ python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" pro
 | search ERR, read OK | search-engine rate limit | wait, or retry with `--proxy` |
 | read `wall.cooldown` | host boxed by wall memory (by design) | honor `retry_after`; for an A/B rerun the same pwsh call with `$env:HERMES_WALL_MEMORY="0"` before the command |
 | read `challenge`/`blocked` | anti-bot wall | `--proxy` → `render` → `mfetch` |
+| read `guard.ssrf` | private/internal target blocked by design (SSRF guard) | pass a public http(s) URL; for deliberate local testing set `$env:HERMES_SSRF_GUARD="0"` in the same pwsh call |
 | probe `match:false` on real content | claim text genuinely absent from the body | `read` the page; probe is exact-substring on extracted text |
 | ranking looks odd | authority/coverage placement factor | A/B: `$env:HERMES_AUTHORITY="0"` in the same pwsh call |
 | one read took ~16 s | full ladder ran (direct → Jina → Wayback) | normal; repeats hit the disk cache in ~0.5 s |

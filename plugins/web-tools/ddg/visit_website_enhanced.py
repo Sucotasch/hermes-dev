@@ -230,8 +230,14 @@ def _fetch_httpx(url, headers):
             kwargs["proxy"] = proxy
         with httpx.Client(**kwargs) as client:
             resp = client.get(url, headers=headers)
-            if resp.text and len(resp.text) > 100:
-                return resp.text
+            try:
+                text = resp.text
+            except Exception:
+                # A malformed charset header must not discard a readable body
+                # (hermes-plugin-web-local lesson): decode the raw bytes.
+                text = resp.content.decode("utf-8", errors="replace")
+            if text and len(text) > 100:
+                return text
     except Exception as e:
         print(f"[visit] httpx fallback error: {e}", file=sys.stderr)
     return None
@@ -259,10 +265,16 @@ def _fetch_subprocess(url, ua, headers):
             time.sleep(2)
     return None
 
+# Jina anonymous rate limit: 2 concurrent requests (Adolanium/hermes-jina
+# documents the same number; exceeding it burns fallback rungs on 429s).
+_JINA_SEMAPHORE = threading.Semaphore(2)
+
+
 def _fetch_jina(url):
     """Jina Reader fallback."""
     jina_url = f"{JINA_URL}{url}"
-    html = _fetch(jina_url, referrer="https://r.jina.ai/")
+    with _JINA_SEMAPHORE:
+        html = _fetch(jina_url, referrer="https://r.jina.ai/")
     if html and len(html) > 100 and not _is_antibot_jina(html):
         return html
     return None

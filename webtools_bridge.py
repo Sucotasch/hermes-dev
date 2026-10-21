@@ -33,7 +33,7 @@ All real output goes to a UTF-8 JSON file (default in the system TEMP directory,
 override with --out); only an ASCII status line is printed to stdout (avoids
 Windows cp1251 crashes).
 """
-import sys, importlib.util, json, types, argparse, traceback, os, tempfile, time, hashlib, urllib.parse, urllib.request, random, subprocess, threading, shutil
+import sys, importlib.util, json, types, argparse, traceback, os, tempfile, time, hashlib, urllib.parse, urllib.request, random, subprocess, threading, shutil, ipaddress, socket
 from pathlib import Path
 
 # ── Silences curl_cffi stderr warning ──────────────────────────────────────
@@ -146,6 +146,62 @@ def _cookie_header_for(cookies_path, url):
         return _common.cookie_header_for(jar, url) or None
     except Exception:
         return None
+
+
+# ── SSRF guard (fail-open; kill switch HERMES_SSRF_GUARD=0) ──────────────────
+# The bridge is an agent-driven fetch primitive: a hostile page or prompt must
+# not be able to point it at private/internal/metadata networks. Std-only
+# checks — loopback/private/link-local/CGNAT/reserved ranges (cloud metadata
+# endpoints live in 169.254.0.0/16); literal IPs checked without DNS,
+# hostnames resolved and every A/AAAA record checked. Discovered via
+# enzo-adami/hermes-plugin-web-local, which led us to Hermes' own
+# tools/url_safety module (28 KB, lives in the framework install, not vendored
+# in this repo — hence this self-contained checker). Accepted limits
+# (documented): no per-redirect-hop rechecks and no DNS-rebinding defense —
+# those need transport-level hooks. Fail-open by design: any internal error
+# allows the fetch; the guard must never break the only network path.
+
+_SSRF_BLOCKED_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+    "::/128", "::1/128", "fc00::/7", "fe80::/10",
+))
+
+
+def _ssrf_gate(url):
+    """(allowed, reason) for an agent-supplied URL. Fail-open → (True, None)."""
+    try:
+        if os.environ.get("HERMES_SSRF_GUARD", "1") != "1":
+            return True, None
+        if not url:
+            return True, None
+        parsed = urllib.parse.urlparse(str(url))
+        scheme = (parsed.scheme or "").lower()
+        if scheme and scheme not in ("http", "https"):
+            return False, f"non-http scheme: {scheme}"
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return True, None
+        try:
+            ip = ipaddress.ip_address(host)      # literal IP: no DNS needed
+        except ValueError:
+            ip = None
+        if ip is not None:
+            if any(ip in net for net in _SSRF_BLOCKED_NETS) or ip.is_reserved:
+                return False, f"private/internal address {host}"
+            return True, None
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except Exception:
+            return True, None    # unresolvable: let the fetch fail naturally
+        for info in infos:
+            rip = ipaddress.ip_address(info[4][0])
+            if any(rip in net for net in _SSRF_BLOCKED_NETS) or rip.is_reserved:
+                return False, (f"{host} resolves to private/internal "
+                               f"{info[4][0]}")
+        return True, None
+    except Exception:
+        return True, None
 
 # ── Newer impersonation targets ────────────────────────────────────────────
 # curl_cffi 0.14.0 supports up to chrome142 and safari260. The repo's default
@@ -473,6 +529,17 @@ def cmd_read(mod, args):
         if cached is not None:
             return cached
 
+    # SSRF guard (fail-open): an agent-supplied URL must not reach
+    # private/internal/metadata networks. Blocked reads are NOT cached —
+    # the kill switch may change the verdict on a later call.
+    s_ok, s_reason = _ssrf_gate(args.url)
+    if not s_ok:
+        return {"url": args.url, "source": "failed", "chars": 0, "text": "",
+                "error": "guard.ssrf", "reason": s_reason,
+                "next_action": ("pass a public http(s) URL; for deliberate "
+                                "local testing set HERMES_SSRF_GUARD=0 in "
+                                "the same pwsh call")}
+
     # Optional user-supplied session cookies (Netscape cookies.txt): matched
     # to this URL's domain, sent only on the direct fetch below.
     cookie_header = _cookie_header_for(args.cookies, args.url)
@@ -724,6 +791,15 @@ def cmd_render(mod, args):
         if cached is not None:
             return cached
 
+    # SSRF guard (fail-open), same policy as cmd_read.
+    s_ok, s_reason = _ssrf_gate(args.url)
+    if not s_ok:
+        return {"url": args.url, "source": "failed", "chars": 0, "text": "",
+                "error": "guard.ssrf", "reason": s_reason,
+                "next_action": ("pass a public http(s) URL; for deliberate "
+                                "local testing set HERMES_SSRF_GUARD=0 in "
+                                "the same pwsh call")}
+
     result = None
     if _render_available():
         html, _src = _fetch_raw_html(args.url)
@@ -819,6 +895,15 @@ def cmd_mfetch(mod, args):
                   or _cache_get("readweak", cache_key, READ_WEAK_TTL))
         if cached is not None:
             return cached
+
+    # SSRF guard (fail-open), same policy as cmd_read — before the browser.
+    s_ok, s_reason = _ssrf_gate(args.url)
+    if not s_ok:
+        return {"url": args.url, "source": "failed", "chars": 0, "text": "",
+                "error": "guard.ssrf", "reason": s_reason,
+                "next_action": ("pass a public http(s) URL; for deliberate "
+                                "local testing set HERMES_SSRF_GUARD=0 in "
+                                "the same pwsh call")}
 
     proxy = args.proxy_url if args.proxy else None
     rendered = _moli_fetch_call(args.url, proxy, args.moli_timeout)
