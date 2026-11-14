@@ -17,6 +17,7 @@ or after a Hermes update that may have removed custom integrations.
 ## Source of truth
 
 - Repo: `D:\Arx\Software Downloads\Hermes copy\hermes-dev`
+- Skills (text, separate canonical repo): `https://github.com/Sucotasch/skill-farm` — clone and read its root `SKILL.md`; it carries the skill→destination table and the install rules.
 - Project knowledge: `D:\Arx\Software Downloads\Hermes copy\hermes-dev\knowledge.md`
 - Restore script: `D:\Arx\Software Downloads\Hermes copy\hermes-dev\restore.ps1`
 
