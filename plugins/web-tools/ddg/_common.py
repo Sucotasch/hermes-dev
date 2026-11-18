@@ -7,7 +7,10 @@ Shared URL-hygiene helpers (ported from Temp/web-media-parser/src/parser/utils.p
   repeated adjacent path segments (anti urljoin-bloat), lowercase scheme/domain.
 """
 
+import ipaddress
+import os
 import re
+import socket
 import time
 from urllib.parse import urlparse, parse_qsl, urlencode
 
@@ -348,3 +351,82 @@ def cookie_header_for(jar, url, now=None):
         return "; ".join(pairs)
     except Exception:
         return ""
+
+def ssrf_blocked(url, use_cache=True):
+    """(blocked, reason) for an agent-supplied URL — shared by every mode.
+
+    The bridge, the Hermes plugin and the standalone pipeline all fetch URLs
+    that can originate from an agent or a hostile page, so the check lives here
+    in _common rather than in one caller. Std-only: literal IPs are checked
+    without DNS, hostnames are resolved and every A/AAAA record is checked
+    against loopback/private/link-local/CGNAT/reserved ranges (cloud metadata
+    lives in 169.254.0.0/16).
+
+    Fail-open by design — an internal error or an unresolvable host allows the
+    fetch (the fetcher reports its own failure). Kill switch:
+    HERMES_SSRF_GUARD=0 for deliberate local testing.
+
+    Accepted limits: no per-redirect-hop rechecks, no DNS-rebinding defence —
+    those need transport-level hooks. Results are cached per host for the
+    process, so the bridge check and the fetcher check do not double-resolve.
+    """
+    try:
+        if os.environ.get("HERMES_SSRF_GUARD", "1") != "1":
+            return False, None
+        if not url:
+            return False, None
+        parsed = urlparse(str(url))
+        scheme = (parsed.scheme or "").lower()
+        if scheme and scheme not in ("http", "https"):
+            return True, f"non-http scheme: {scheme}"
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return False, None
+        if use_cache and host in _SSRF_HOST_CACHE:
+            return _SSRF_HOST_CACHE[host]
+        verdict = _ssrf_verdict(host)
+        if use_cache:
+            if len(_SSRF_HOST_CACHE) >= _SSRF_CACHE_MAX:
+                _SSRF_HOST_CACHE.clear()
+            _SSRF_HOST_CACHE[host] = verdict
+        return verdict
+    except Exception:
+        return False, None
+
+
+def _ssrf_verdict(host):
+    try:
+        ip = ipaddress.ip_address(host)          # literal IP: no DNS
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if _is_blocked_ip(ip):
+            return True, f"private/internal address {host}"
+        return False, None
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False, None                       # unresolvable: let it fail
+    for info in infos:
+        try:
+            rip = ipaddress.ip_address(info[4][0])
+        except Exception:
+            continue
+        if _is_blocked_ip(rip):
+            return True, f"{host} resolves to private/internal {info[4][0]}"
+    return False, None
+
+
+def _is_blocked_ip(ip):
+    if ip.is_reserved:
+        return True
+    return any(ip in net for net in _SSRF_BLOCKED_NETS)
+
+
+_SSRF_BLOCKED_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+    "::/128", "::1/128", "fc00::/7", "fe80::/10",
+))
+_SSRF_HOST_CACHE = {}
+_SSRF_CACHE_MAX = 512

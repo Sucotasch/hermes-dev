@@ -150,7 +150,67 @@ def test_render_blocks_private_before_deno(wall):
     assert res["error"] == "guard.ssrf"
 
 
-# ── Jina anonymous concurrency cap ──────────────────────────────────────────
+# ── shared guard: the fetcher itself (all execution modes) ─────────────────
+
+def test_common_guard_blocks_metadata_and_allows_public():
+    import _common
+    blocked, why = _common.ssrf_blocked("http://169.254.169.254/latest/meta-data/")
+    assert blocked and why
+    assert _common.ssrf_blocked("https://example.com/") == (False, None)
+
+
+def test_common_guard_kill_switch(monkeypatch):
+    import _common
+    monkeypatch.setenv("HERMES_SSRF_GUARD", "0")
+    monkeypatch.setattr(_common, "_SSRF_HOST_CACHE", {})
+    assert _common.ssrf_blocked("http://192.168.5.5/") == (False, None)
+
+
+def test_common_guard_caches_per_host(monkeypatch):
+    import _common
+    calls = []
+    monkeypatch.setattr(_common, "_SSRF_HOST_CACHE", {})
+    monkeypatch.setattr(_common, "_ssrf_verdict",
+                        lambda host: calls.append(host) or (False, None))
+    _common.ssrf_blocked("https://cached.example/a")
+    _common.ssrf_blocked("https://cached.example/b")
+    assert calls == ["cached.example"]        # one resolution, not two
+
+
+class _FetchSpy:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, url, referrer=None, cookies=None):
+        self.calls.append(url)
+        return "<html><body><p>" + "word " * 200 + "</p></body></html>"
+
+
+def test_vwe_blocks_private_before_any_fetch(monkeypatch):
+    spy = _FetchSpy()
+    monkeypatch.setattr(vwe, "_fetch", spy)
+    out = vwe.visit_website("http://127.0.0.1:8080/admin")
+    assert out.get("error") == "guard.ssrf"
+    assert out.get("source") == "failed"
+    assert spy.calls == []                    # no network in this mode either
+
+
+def test_vwe_allows_public_still(monkeypatch):
+    spy = _FetchSpy()
+    monkeypatch.setattr(vwe, "_fetch", spy)
+    out = vwe.visit_website("https://example.com/")
+    assert spy.calls == ["https://example.com/"]
+    assert out.get("error") != "guard.ssrf"
+
+
+def test_vwe_kill_switch_reaches_fetch(monkeypatch):
+    monkeypatch.setenv("HERMES_SSRF_GUARD", "0")
+    import _common
+    monkeypatch.setattr(_common, "_SSRF_HOST_CACHE", {})
+    spy = _FetchSpy()
+    monkeypatch.setattr(vwe, "_fetch", spy)
+    vwe.visit_website("http://127.0.0.1:9/x")
+    assert spy.calls == ["http://127.0.0.1:9/x"]
 
 def test_jina_concurrency_capped_at_two(monkeypatch):
     active, peak = [], [0]

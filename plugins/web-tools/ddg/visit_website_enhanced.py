@@ -31,12 +31,14 @@ try:
     _NORMALIZE_URL = _cm_module.normalize_url
     _STRIP_TRACKING = _cm_module.strip_tracking_params
     _CONSENT_HEADER = _cm_module.consent_cookie_header
+    _SSRF_CHECK = _cm_module.ssrf_blocked
 except Exception:
     def _normalize_url(u):
         return u
     _NORMALIZE_URL = _normalize_url
     _STRIP_TRACKING = _normalize_url
     _CONSENT_HEADER = lambda url: None
+    _SSRF_CHECK = lambda url: (False, None)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 # Proxy resolution mirrors ddg_search (DDG_PROXY env → HTTPS_PROXY/HTTP_PROXY →
@@ -1046,6 +1048,19 @@ def visit_website(url, max_chars=MAX_CHARS, find_terms=None, max_links=50, max_i
     the direct curl_cffi fetch only; the Jina/Wayback fallbacks are third-party
     hosts and never see it (cookies never cross domains).
     """
+    # ── Step 0a: SSRF guard ──
+    # This fetcher is reachable from every execution mode — the Hermes
+    # visit_website_tool, the standalone pipeline and the bridge — so the check
+    # lives here too, not only in the bridge. Fail-open; kill switch
+    # HERMES_SSRF_GUARD=0 for deliberate local testing.
+    try:
+        _blocked, _why = _SSRF_CHECK(url)
+    except Exception:
+        _blocked, _why = False, None
+    if _blocked:
+        return {"error": "guard.ssrf", "reason": _why, "content": "",
+                "source": "failed", "url": url}
+
     # ── Step 0: PDF fast path (bounded pypdf extraction, fail-open) ──
     # Only when the URL itself looks like a PDF — before the HTML fetch ladder
     # so a PDF link yields text on the first request, not binary soup.
