@@ -47,6 +47,18 @@ META_PATH = os.path.join(_CACHE_DIR, "imagus_sieve.meta.json")
 MIN_RULES = 20          # a real ruleset has hundreds; this rejects garbage
 MIN_BYTES = 10_000
 
+# Auto-fetch, used only when NO rules are available at all (fresh clone).
+# Bounded on purpose: a short timeout, one attempt per ATTEMPT_TTL, and a
+# negative-cache marker so an offline machine does not pay the timeout on
+# every run. Kill switch: HERMES_SIEVE_AUTOFETCH=0.
+AUTOFETCH_TIMEOUT = 6   # seconds
+AUTOFETCH_TTL = 24 * 3600
+ATTEMPT_MARKER_NAME = "imagus_sieve.attempt"
+
+
+def _attempt_marker():
+    return os.path.join(_CACHE_DIR, ATTEMPT_MARKER_NAME)
+
 
 def _looks_like_sieve(data):
     """True for a plausible Imagus ruleset: dict of rule objects."""
@@ -139,6 +151,46 @@ def _bundled_rules_path():
 def latest_rules_path():
     """Cache first, then a bundled snapshot, else None (sieve disables)."""
     return _cached_rules_path() or _bundled_rules_path()
+
+
+def _autofetch_enabled():
+    return os.environ.get("HERMES_SIEVE_AUTOFETCH", "1") != "0"
+
+
+def _recent_attempt():
+    """True when a recent auto-fetch attempt already failed (negative cache)."""
+    try:
+        return (time.time() - os.path.getmtime(_attempt_marker())) < AUTOFETCH_TTL
+    except Exception:
+        return False
+
+
+def _mark_attempt():
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        with open(_attempt_marker(), "w", encoding="utf-8") as fh:
+            fh.write("auto-fetch attempt\n")
+    except Exception:
+        pass
+
+
+def ensure_rules(timeout=AUTOFETCH_TIMEOUT):
+    """Fetch the ruleset only when none exist; bounded and rate-limited.
+
+    Called lazily from the sieve loader, so a run that never needs image
+    upgrades never touches the network. Returns the update() dict when it
+    tried, else None. Never raises.
+    """
+    try:
+        if _cached_rules_path() or _bundled_rules_path():
+            return None                     # nothing to do
+        if not _autofetch_enabled() or _recent_attempt():
+            return None                     # opted out, or recently failed
+        result = update(timeout=timeout)
+        _mark_attempt()                     # throttle retries either way
+        return result
+    except Exception as exc:                # noqa: BLE001 - fail-open
+        return {"ok": False, "error": str(exc)[:200]}
 
 
 def cache_age_days():

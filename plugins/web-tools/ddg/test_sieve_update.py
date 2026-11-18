@@ -1,4 +1,4 @@
-﻿"""Tests for sieve_update (fetch / validate / cache / load order).
+"""Tests for sieve_update (fetch / validate / cache / load order).
 
 No network: fetch() is monkeypatched. Run from plugins/web-tools/ddg/::
 
@@ -150,4 +150,60 @@ def test_cli_reports_failure(monkeypatch, capsys):
     monkeypatch.setattr(su, "fetch", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
     assert su._main() == 1
     assert "FAILED" in capsys.readouterr().out
+
+
+# ── auto-fetch when nothing is available (bounded, rate-limited) ───────────
+
+def test_ensure_rules_fetches_when_empty(cache_dir, monkeypatch):
+    calls = []
+
+    def fake_fetch(url=su.SIEVE_URL, timeout=su.TIMEOUT):
+        calls.append(timeout)
+        return json.dumps(_ruleset(200))
+
+    monkeypatch.setattr(su, "fetch", fake_fetch)
+    monkeypatch.setattr(su, "_bundled_rules_path", lambda: None)
+    res = su.ensure_rules()
+    assert res["ok"] is True
+    assert calls and calls[0] == su.AUTOFETCH_TIMEOUT      # short, bounded
+    assert Path(su.CACHE_PATH).exists()
+
+
+def test_ensure_rules_noop_when_cache_exists(cache_dir, monkeypatch):
+    Path(su.CACHE_PATH).write_text(json.dumps(_ruleset(200)), encoding="utf-8")
+    called = []
+    monkeypatch.setattr(su, "fetch", lambda *a, **k: called.append(1) or "{}")
+    assert su.ensure_rules() is None
+    assert called == []
+
+
+def test_ensure_rules_negative_cache_throttles_retries(cache_dir, monkeypatch):
+    attempts = []
+
+    def failing_fetch(url=su.SIEVE_URL, timeout=su.TIMEOUT):
+        attempts.append(1)
+        raise OSError("offline")
+
+    monkeypatch.setattr(su, "fetch", failing_fetch)
+    monkeypatch.setattr(su, "_bundled_rules_path", lambda: None)
+    assert su.ensure_rules()["ok"] is False
+    assert su.ensure_rules() is None          # within TTL: skipped
+    assert len(attempts) == 1                 # only one network attempt
+
+
+def test_ensure_rules_kill_switch(cache_dir, monkeypatch):
+    monkeypatch.setenv("HERMES_SIEVE_AUTOFETCH", "0")
+    monkeypatch.setattr(su, "_bundled_rules_path", lambda: None)
+    called = []
+    monkeypatch.setattr(su, "fetch", lambda *a, **k: called.append(1) or "{}")
+    assert su.ensure_rules() is None
+    assert called == []
+
+
+def test_sieve_autofetches_on_empty_cache(cache_dir, monkeypatch):
+    import sieve
+    monkeypatch.setattr(su, "_bundled_rules_path", lambda: None)
+    monkeypatch.setattr(su, "fetch",
+                        lambda url=su.SIEVE_URL, timeout=su.TIMEOUT: json.dumps(_ruleset(200)))
+    assert sieve._default_rules_path() == su.CACHE_PATH
 

@@ -36,14 +36,22 @@ def _default_rules_path():
 
     The rules live upstream (kuzn123/Imagus-Sieve-RuBoard, no license) and are
     fetched by ``sieve_update.py`` into the local cache — see that module for
-    why we do not vendor them. Fail-open: with neither available the sieve
-    disables itself and image extraction runs without the upgrade rules.
+    why we do not vendor them. When neither a cache nor a bundled snapshot
+    exists (fresh clone), one bounded auto-fetch is attempted here; it is
+    rate-limited to one attempt per day and skipped when HERMES_SIEVE_AUTOFETCH=0.
+    Fail-open: with nothing available the sieve disables itself and image
+    extraction runs without the upgrade rules.
     """
     try:
         import sieve_update
         path = sieve_update.latest_rules_path()
         if path:
             return path
+        res = sieve_update.ensure_rules()
+        if res and res.get("ok"):
+            path = sieve_update.latest_rules_path()
+            if path:
+                return path
     except Exception:
         pass
     return os.path.join(_RESOURCES_DIR, _SIEVE_FILENAME)
