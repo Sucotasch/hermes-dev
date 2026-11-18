@@ -32,6 +32,11 @@ node_modules/
 # wall_memory tests: hermetic per-test state dirs (created and removed)
 .wall_test_state/
 
+# Imagus sieve rules: fetched on demand by sieve_update.py, NOT vendored —
+# the upstream repo (kuzn123/Imagus-Sieve-RuBoard) declares no license, so we
+# do not redistribute a snapshot. Local copies stay untracked.
+plugins/web-tools/ddg/resources/Imagus_sieve_*.json
+
 # Moli headless browser (vendored binary ~97 MB)
 # Copy from the extracted release zip to moli/moli.exe:
 #   Copy-Item "$src\moli.exe" "moli\moli.exe"

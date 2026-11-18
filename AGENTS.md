@@ -103,6 +103,7 @@ python standalone/deep_research.py "your query" --server http://localhost:8888
 - Platform domains (blogspot, livejournal) use path-based dedup, not base domain.
 - **DSH harness sandbox cannot run `restore.ps1`**: the PowerShell AuthorizationManager check fails (`Ошибка при проверке AuthorizationManager`) even with full-access escalation. Run it from the user's own terminal. Note the manifest is exact — commits that only touch repo-root files (bridge, docs) or add plugin modules not yet in the manifest are restore no-ops; verify with the manifest list in `restore.ps1` before invoking.
 - **pytest `tmp_path` is not reliably usable under the DSH sandbox** (`WinError 5` on the `pytest-of-*` dir, even though plain writes to `%TEMP%` work). Write hermetic per-test state dirs inside the repo instead (see the `state_dir` fixture in `plugins/web-tools/ddg/test_wall_memory.py`).
+- **Imagus sieve rules are fetched, not vendored.** The upstream (`kuzn123/Imagus-Sieve-RuBoard`, served as `master/update.txt`) declares no license, so a snapshot is not committed here; `sieve_update.py` downloads it into `%TEMP%\hermes_web_cache\imagus_sieve.json` and `sieve.py` prefers that cache over any bundled copy. Without it the sieve silently disables (images keep thumbnail size). Rules change often — re-run `python plugins/web-tools/ddg/sieve_update.py` after a few weeks.
 
 ### Bridge gotchas
 

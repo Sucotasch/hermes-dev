@@ -31,6 +31,24 @@ _SIEVE_FILENAME = "Imagus_sieve_2026.07.15_823.json"
 _RESOURCES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
 
 
+def _default_rules_path():
+    """Newest available ruleset: refreshed cache, else a bundled snapshot.
+
+    The rules live upstream (kuzn123/Imagus-Sieve-RuBoard, no license) and are
+    fetched by ``sieve_update.py`` into the local cache — see that module for
+    why we do not vendor them. Fail-open: with neither available the sieve
+    disables itself and image extraction runs without the upgrade rules.
+    """
+    try:
+        import sieve_update
+        path = sieve_update.latest_rules_path()
+        if path:
+            return path
+    except Exception:
+        pass
+    return os.path.join(_RESOURCES_DIR, _SIEVE_FILENAME)
+
+
 # DOM keywords that indicate a rule needs browser context → cannot convert.
 _DOM_KEYWORDS = (
     "this.node", "this.TRG", "this.find", "this.set", "this.prepare",
@@ -281,7 +299,7 @@ class _Sieve:
     """Lazy-loaded Imagus sieve rule set with domain indexing."""
 
     def __init__(self, path=None):
-        self._path = path or os.path.join(_RESOURCES_DIR, _SIEVE_FILENAME)
+        self._path = path or _default_rules_path()
         self._domain_rules = {}   # domain -> [rule]
         self._global_rules = []   # rules without a recognizable domain
         self._all_rules = []      # every rule (fallback scan when domain index misses)

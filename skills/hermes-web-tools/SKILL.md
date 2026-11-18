@@ -278,7 +278,8 @@ python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" pro
 | probe `match:false` on real content | claim text genuinely absent from the body | `read` the page; probe is exact-substring on extracted text |
 | ranking looks odd | authority/coverage placement factor | A/B: `$env:HERMES_AUTHORITY="0"` in the same pwsh call |
 | one read took ~16 s | full ladder ran (direct → Jina → Wayback) | normal; repeats hit the disk cache in ~0.5 s |
-| `mfetch` took ~10–12 s | settle delay (default 8 s) + browser start | normal; `--moli-settle 0` is faster but returns empty on challenged pages |
+| `mfetch` took ~7 s | settle delay (default 5 s) + browser start | normal; `--moli-settle 0` is faster but returns empty on challenged pages |
+| images stay small / no full-size upgrade | Imagus sieve rules missing (not vendored — upstream has no license) | `python plugins/web-tools/ddg/sieve_update.py` (re-run occasionally; rules change often) |
 
 Env kill-switches do not persist between pwsh calls — set and run in ONE invocation,
 e.g. `$env:HERMES_WALL_MEMORY="0"; python "<bridge>" read --url ... --out ...`.

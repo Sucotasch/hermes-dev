@@ -97,7 +97,15 @@ pip install httpx curl_cffi ddgs beautifulsoup4 lxml trafilatura htmldate PyQt5 
 git clone https://github.com/Sucotasch/hermes-dev.git
 cd hermes-dev
 python standalone/deep_research.py "your query" --server http://127.0.0.1:11434
+
+# optional, recommended: full-size image upgrade rules (Imagus sieve).
+# Not vendored in this repo — the upstream has no license — so fetch them:
+python plugins/web-tools/ddg/sieve_update.py
 ```
+Without the last step the pipeline still works; images keep whatever size the
+site served (the sieve only upgrades them to full size). Rules change often, so
+re-run it occasionally — the command is idempotent and writes to the same
+`%TEMP%\hermes_web_cache\` cache the bridge uses.
 
 ### 2b. AI coding agent (DeepSeek Harness, Codex, Claude Code, …) — zero-API web tools
 Your agent gets `search` / `read` / `image` / `expand` / `render` primitives with no search-API keys, backed by the same pipeline. No Hermes, no LLM server needed — the agent itself synthesizes from the returned evidence.

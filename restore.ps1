@@ -119,6 +119,7 @@ $Files = @(
     @{ Repo = 'plugins\web-tools\ddg\_coverage.py'; Dest = 'plugins\web-tools\ddg\_coverage.py' }
     @{ Repo = 'plugins\web-tools\ddg\_common.py'; Dest = 'plugins\web-tools\ddg\_common.py' }
     @{ Repo = 'plugins\web-tools\ddg\sieve.py'; Dest = 'plugins\web-tools\ddg\sieve.py' }
+    @{ Repo = 'plugins\web-tools\ddg\sieve_update.py'; Dest = 'plugins\web-tools\ddg\sieve_update.py' }
     @{ Repo = 'plugins\web-tools\ddg\junk_filter.py'; Dest = 'plugins\web-tools\ddg\junk_filter.py' }
     @{ Repo = 'plugins\web-tools\ddg\discovery.py'; Dest = 'plugins\web-tools\ddg\discovery.py' }
     @{ Repo = 'plugins\web-tools\ddg\evidence_rank.py'; Dest = 'plugins\web-tools\ddg\evidence_rank.py' }
@@ -239,6 +240,7 @@ $Targets = @(
     'plugins\web-tools\ddg\query_variants.py',
     'plugins\web-tools\ddg\selection.py',
     'plugins\web-tools\ddg\sieve.py',
+    'plugins\web-tools\ddg\sieve_update.py',
     'plugins\web-tools\ddg\junk_filter.py',
     'plugins\web-tools\ddg\discovery.py',
     'plugins\web-tools\ddg\evidence_rank.py',
