@@ -158,6 +158,10 @@ python standalone/gui.py     # or double-click gui_launcher.bat
 ```
 Features: LLM endpoint test (auto-discovers `/v1/models` or `/api/tags`), parameter presets (Minimal / Balanced / Visual / Maximum), proxy toggle, query-type dropdown, **No LLM** checkbox (zero LLM requests), real-time progress with stage mapping, file logging, and the Hermes **"Check & Restore"** button.
 
+![Standalone GUI](docs/screenshots/standalone-gui.png)
+
+*The real window, idle (no run started). Requires PyQt5; Linux/macOS run it on a display.*
+
 ### 3. Native Python API
 ```python
 from plugins.web_tools.ddg.ddg_search import search_deep
