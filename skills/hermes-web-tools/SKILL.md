@@ -88,10 +88,11 @@ python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" pro
 # network, so it renders SPAs (React/Vue/Next.js CSR sites) that the Deno
 # happy-dom worker (inline JS only, sandboxed no-net) cannot extract.
 # ✅ Moli CAN clear Cloudflare's JS challenge, but only if you let the page
-# settle: --moli-settle (default 8000 ms) is passed as moli --delay-ms.
-# Measured (Moli 1.1.2): 0 ms dump = 0 chars in ~1 s; 8 s = 161k chars of the
-# real article. Clearing is opportunistic — repeated calls hit CF 429
-# ("Just a moment…"), so expect variance. Hard ASN/geo blocks are out of scope.
+# settle: --moli-settle (default 5000 ms) is passed as moli --delay-ms.
+# Measured threshold on Moli 1.1.2: 3000 ms = empty, 5000 ms = full article
+# (151k chars, 2/2 runs, ~7 s). Clearing is opportunistic — rapid repeats get
+# CF 429, then the call falls back to the read ladder. For hard/geo blocks
+# retry with --proxy (mfetch passes it to Moli as --http-proxy).
 # ⚠️ REQUIRES sandbox_permissions: danger-full-access on the pwsh call —
 # the sandbox blocks Moli's TLS stack (like git's schannel issue); with the
 # escalation Moli works for HTTPS. Without it, mfetch degrades to read.
@@ -151,12 +152,15 @@ Optional flags:
   cannot. It **can** clear Cloudflare's JS challenge when given the settle
   delay (verified), but not reliably under repeated calls (CF 429) — see the
   ✅ note above.
-- `--moli-settle N` (default 8000 ms): how long the page may settle before the
-  dump. This is what makes challenge clearing work; `0` gives a fast, empty
-  result on challenged pages. Cost: `mfetch` takes ~10–12 s.
+- `--moli-settle N` (default 5000 ms): how long the page may settle before the
+  dump — this is what makes challenge clearing work (3000 ms was not enough,
+  5000 ms worked; `0` gives a fast, empty result on challenged pages).
+  Cost: `mfetch` takes ~7 s. `render`'s escalation forces 0, so the delay
+  never stacks on Deno's timeout — use `mfetch` when you need the wait.
 - A render shorter than 300 chars is treated as a shell and falls through to
   the `read` ladder (measured: a CF 429 dumped to markdown is ~496 chars and
-  carries none of our challenge markers).
+  carries none of our challenge markers). Add `--no-wayback` to bound that
+  fallback (~5 s instead of up to ~60 s with archive.org).
 - `source:"moli"` means Moli successfully rendered the page. `challenge` and
   `blocked` fields follow the same semantics as `read`.
 - Fail-open: if Moli is unavailable, blocked by the sandbox (common in this
@@ -219,9 +223,9 @@ Optional flags:
   the post-JS text.
 - **Browser only on demand:** the plain read/render ladder has no browser;
   `mfetch` (vendored Moli) renders real SPAs and needs `danger-full-access`
-  escalation in this sandbox. It clears some Cloudflare JS challenges with the
-  settle delay (verified, opportunistic — CF 429 under repeat calls); hard
-  ASN/geo blocks stay blocked and Wayback remains the fallback (see mfetch).
+  escalation in this sandbox. It clears some Cloudflare JS challenges given the
+  settle delay (opportunistic — CF 429 under repeat calls); hard/geo blocks are
+  retried with `--proxy`, and Wayback remains the fallback (see mfetch).
 - **egress works** (confirmed HTTP 200 from duckduckgo), but some hosts rate-limit;
   repeat calls are cache-protected, `--proxy` adds a retry path via local NecoBox.
 - **NecoBox proxy** (`127.0.0.1:2080`) is local and free: pass `--proxy` when a site

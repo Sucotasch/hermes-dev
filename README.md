@@ -217,21 +217,21 @@ real V8 + network stack (client-side SPAs, content behind external scripts);
 or when Moli returns a wall, the call degrades to the normal `read` ladder and
 the result's `source` field says which tier actually answered.
 
-Settling matters: Moli waits `--moli-settle` ms (default 8000) before dumping.
-Measured on Moli 1.1.2: a Cloudflare JS challenge needs those seconds — with a
-0 ms dump the same page came back **empty (0 chars in ~1 s)**; with the delay it
-returned the full article (**161k chars, content verified**). `--wait-until
-networkidle` alone changed nothing. The cost is latency: `mfetch` now takes
-~10–12 s instead of ~1 s (`--moli-settle 0` restores the fast, empty-on-challenge
-behaviour).
+Settling matters: Moli waits `--moli-settle` ms (default 5000) before dumping.
+Measured against a Cloudflare-challenged page (Moli 1.1.2): 3000 ms returned
+nothing, 5000 ms returned the full article (~151k chars) on 2/2 runs in ~7 s,
+8000 ms also worked but cost ~12 s. `--wait-until networkidle` alone changed
+nothing. `render`'s Moli escalation forces 0 so this delay never stacks on
+Deno's timeout; `mfetch` is the patient path (`--moli-settle 0` opts out).
 
 Honest limits (measured, not assumed): Moli **does** clear Cloudflare's JS
-challenge on some sites (stackoverflow: 4 of 9 attempts across runs, the rest
-came back as CF **429** "Just a moment…"), so treat challenge clearing as
-opportunistic, not guaranteed. Hard blocks are different and out of scope —
-g2.com answered "Sorry, you have been blocked", glassdoor answered a regional
-refusal; no browser fixes an ASN or geo block. Inside the harness sandbox Moli's
-HTTPS stack is blocked (HTTP still works), so `mfetch` degrades to `read` there.
+challenge, but opportunistically — under rapid repeats Cloudflare answers **429**
+("Just a moment…") and the call falls back to the read ladder (with
+`--no-wayback` that fallback is ~5 s; with it, archive.org can add up to ~60 s).
+Hard blocks and regional refusals are handled like everywhere else in this
+pipeline: retry with **`--proxy`** (NecoBox) — `mfetch` passes it to Moli as
+`--http-proxy`. Inside the harness sandbox Moli's HTTPS stack is blocked (HTTP
+still works), so `mfetch` degrades to `read` there.
 
 Deno engine setup (once, ~130 MB, gitignored):
 ```powershell

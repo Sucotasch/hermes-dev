@@ -289,12 +289,12 @@ def _render_available():
 # works and gives full-JS rendering.
 _MOLI_LOCAL = os.path.join(_REPO_ROOT, "moli", "moli.exe")
 MOLI_TIMEOUT = 30.0  # seconds
-# Settle time before Moli dumps the page. Measured (2026-11, Moli 1.1.2): a
-# Cloudflare JS challenge needs ~8 s to resolve; with the default --delay-ms 0
-# Moli dumps an empty document for challenged pages (0 chars in ~1 s), while
-# with the delay it returned the real page (162k chars, content verified).
-# `--wait-until networkidle` alone changed nothing. 0 disables the delay.
-MOLI_SETTLE_MS = 8000
+# Settle time before Moli dumps the page. Measured threshold (Moli 1.1.2,
+# Cloudflare-challenged stackoverflow, same session): 3000 ms -> empty (5.3 s);
+# 5000 ms -> full article on 2/2 runs (~7 s total); 8000 ms -> also worked, but
+# ~12 s. `--wait-until networkidle` alone changed nothing. 0 disables it, and
+# render's escalation forces 0 so this delay never stacks on Deno's timeout.
+MOLI_SETTLE_MS = 5000
 # Below this, Moli's markdown is a shell, not content: a CF 429/interstitial
 # dumped to markdown measured ~496 chars with no marker from our list, so the
 # marker check alone would have passed it through as "real".
@@ -834,8 +834,15 @@ def cmd_render(mod, args):
                     }
 
     if result is None:
-        # Fail-open: try Moli (full browser), then the plain read ladder
-        return cmd_mfetch(mod, args) if _moli_available() else cmd_read(mod, args)
+        # Fail-open: try Moli (full browser), then the plain read ladder.
+        if _moli_available():
+            # render is the FAST tier: escalate with settle 0 so the browser's
+            # settle delay never stacks on top of Deno's timeout and the read
+            # ladder. `mfetch` is the explicit, patient path for challenges.
+            fast = types.SimpleNamespace(**vars(args))
+            fast.moli_settle = 0
+            return cmd_mfetch(mod, fast)
+        return cmd_read(mod, args)
 
     if not args.no_cache:
         if result.get("chars", 0) < 500:

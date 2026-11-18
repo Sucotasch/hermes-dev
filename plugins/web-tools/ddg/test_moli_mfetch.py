@@ -150,3 +150,29 @@ def test_empty_render_falls_back(wall, monkeypatch):
     sentinel = {"url": "u", "source": "wayback", "chars": 900, "text": "arch"}
     monkeypatch.setattr(bridge, "cmd_read", lambda mod, args: sentinel)
     assert bridge.cmd_mfetch(None, _args("https://none.example/")) is sentinel
+
+
+# ── no stacking: render's Moli escalation must not inherit the settle delay ──
+
+def test_render_escalation_uses_zero_settle(wall, monkeypatch):
+    """render = Deno timeout + (Moli + settle) + read ladder. If the settle
+    leaked into this path the worst case would stack ~8 s on top of Deno's
+    budget; render must escalate with settle 0 and leave mfetch as the
+    patient path."""
+    seen = {}
+
+    def fake_mfetch(mod, args):
+        seen["settle"] = args.moli_settle
+        return {"url": args.url, "source": "moli", "chars": 500, "text": "x " * 300}
+
+    monkeypatch.setattr(bridge, "_moli_available", lambda: True)
+    monkeypatch.setattr(bridge, "_render_available", lambda: False)
+    monkeypatch.setattr(bridge, "cmd_mfetch", fake_mfetch)
+    args = types.SimpleNamespace(url="https://render.example/", max_chars=8000,
+                                 no_cache=True, moli_timeout=30.0,
+                                 moli_settle=8000, proxy=False,
+                                 proxy_url="http://127.0.0.1:2080", cookies="",
+                                 wait_ms=500, render_timeout=8.0)
+    bridge.cmd_render(None, args)
+    assert seen["settle"] == 0
+    assert args.moli_settle == 8000        # caller's args not mutated
