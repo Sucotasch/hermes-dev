@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Tests the PyQt5 GUI, so it follows the GUI's license — see THIRD_PARTY_NOTICES.md.
 """Offscreen smoke test for the standalone GUI (no display needed).
 
 Instantiates the main window with QT_QPA_PLATFORM=offscreen and asserts

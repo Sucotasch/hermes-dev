@@ -267,8 +267,19 @@ python -m pytest plugins/web-tools/ddg/ hermes-agent/tools/test_ddg_search_tool.
 - 40-46% of URLs blocked by Cloudflare/WAF — proxy retry recovers 5-10%
 - IMDB, Wikipedia, Reddit blocked without JS execution or API access
 - Relevance scoring is keyword-based — wrong-person/same-name pages can slip into visual reports
-- No headless browser — JS-heavy SPA content is missed
+- No browser in the default read ladder — JS-heavy SPA content needs the optional `mfetch` tier (Moli binary, `danger-full-access` in a sandbox)
 - Visual queries download every candidate image to check size/format — the phase takes minutes (progress is now logged); the number embedded in the report can be capped in the GUI (0 = all)
+
+## License
+**MIT** for the whole repository, with one scoped exception: the standalone GUI
+(`standalone/gui.py`, its smoke test and `gui_launcher.bat`) is
+**GPL-3.0-or-later**, because it binds PyQt5 (GPL v3 / commercial).
+
+- [`LICENSE`](LICENSE) — MIT text and the scope note
+- [`LICENSE-GPL-3.0.txt`](LICENSE-GPL-3.0.txt) — GNU GPL v3
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — every component we rely
+  on, its license, and what is deliberately *not* redistributed (Moli, Deno and
+  the Imagus sieve rules are fetched or installed by the user, not vendored here)
 
 ## Development Rules
 1. Edit files in this repo, never in `~/.hermes` directly

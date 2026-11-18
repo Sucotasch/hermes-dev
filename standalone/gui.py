@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: GPL-3.0-or-later
+# This file is GPL-3.0-or-later (not MIT) because it binds PyQt5, which is
+# GPL v3 / commercial. The rest of the repository is MIT — see LICENSE,
+# LICENSE-GPL-3.0.txt and THIRD_PARTY_NOTICES.md.
 """Hermes Deep Research — unified GUI (PyQt5).
 
 Launch: python standalone/gui.py
