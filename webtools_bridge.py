@@ -1,7 +1,7 @@
-﻿"""Runtime bridge v2: exposes the Hermes web-tools as plain Python primitives.
+"""Runtime bridge v2: exposes the Hermes web-tools as plain Python primitives.
 
 v2 improvements over v1:
-  - CURL_CA_BUNDLE в†’ certifi CA (silences curl_cffi cert-store stderr noise)
+  - CURL_CA_BUNDLE → certifi CA (silences curl_cffi cert-store stderr noise)
   - Disk cache for read (url, 6 h) and search (query, 1 h)
   - Wayback Machine fallback: when direct+jina fail, fetch from archive.org
   - --proxy flag: enable NecoBox 127.0.0.1:2080 retry for the whole call
@@ -9,7 +9,7 @@ v2 improvements over v1:
   - --no-cache / --no-wayback toggles
   - Unique default --out (timestamp + pid) per call
   - source_query filled from the original query in search results
-  - New subcommand "expand" вЂ” Level-2 hyperlink expansion (wrapper _safe_expand_and_fetch)
+  - New subcommand "expand" — Level-2 hyperlink expansion (wrapper _safe_expand_and_fetch)
 
 Used by the DeepSeek Harness host agent to SEARCH, READ, and IMAGE-SEARCH the
 web without a paid API. The Hermes wrapper is loaded with a no-op registry stub
@@ -27,16 +27,16 @@ Result fields:
   - read/render: `challenge: true` + `blocked: cloudflare|aws_waf|recaptcha|login|generic`
     when the page is an anti-bot/login wall (stable codes to branch on).
   - search: `handle: S<n>` per result; read: `handle: L<n>` per link (reference
-    handles вЂ” cheap to cite in agent turns).
+    handles — cheap to cite in agent turns).
 
 All real output goes to a UTF-8 JSON file (default in the system TEMP directory,
 override with --out); only an ASCII status line is printed to stdout (avoids
 Windows cp1251 crashes).
 """
-import sys, importlib.util, json, types, argparse, traceback, os, tempfile, time, hashlib, urllib.parse, urllib.request, random, subprocess, threading, shutil, ipaddress, socket
+import sys, importlib.util, json, types, argparse, traceback, os, tempfile, time, hashlib, urllib.parse, urllib.request, random, subprocess, threading, shutil
 from pathlib import Path
 
-# в”Ђв”Ђ Silences curl_cffi stderr warning в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ── Silences curl_cffi stderr warning ──────────────────────────────────────
 # "failed to load native root certificate" comes from libcurl trying to read
 # the Windows cert store (blocked by the harness sandbox). Pointing it at
 # certifi's bundled CA file avoids the store access entirely.
@@ -47,12 +47,12 @@ try:
 except Exception:
     pass
 
-# в”Ђв”Ђ Paths в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ── Paths ───────────────────────────────────────────────────────────────────
 HERMES = Path(r"d:\Arx\Software Downloads\Hermes copy\hermes-dev")
 WRAPPER = HERMES / "hermes-agent" / "tools" / "ddg_search_tool.py"
 PLUGIN_DIR = HERMES / "plugins" / "web-tools" / "ddg"
 
-# в”Ђв”Ђ Cache в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ── Cache ───────────────────────────────────────────────────────────────────
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "hermes_web_cache")
 READ_TTL = 6 * 3600          # 6 hours
 READ_WEAK_TTL = 5 * 60       # weak/failed reads: 5 min so they get retried soon
@@ -60,7 +60,7 @@ SEARCH_TTL = 1 * 3600        # 1 hour
 EXPAND_TTL = 1 * 3600        # 1 hour
 IMAGE_TTL = 30 * 60          # 30 min
 
-# в”Ђв”Ђ Wall memory (optional, fail-open) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ── Wall memory (optional, fail-open) ───────────────────────────────────────
 # Persistent per-domain wall state (plugins/web-tools/ddg/wall_memory.py): a
 # host that keeps serving anti-bot shells is boxed, so the next call answers
 # honestly in milliseconds (error "wall.cooldown" + retry_after) instead of
@@ -71,7 +71,7 @@ _WALL_TRIED = False
 
 
 def _wall():
-    """Lazy fail-open accessor for wall_memory; None в‡’ every caller no-ops.
+    """Lazy fail-open accessor for wall_memory; None ⇒ every caller no-ops.
 
     Loaded through sys.path (PLUGIN_DIR is inserted by _load_wrapper too);
     any failure leaves _WALL_MEM at None and the bridge behaves as before.
@@ -132,7 +132,7 @@ def _cookie_header_for(cookies_path, url):
     Fail-open: a missing/unreadable file, a missing _common module or a parse
     error all yield None (the fetch proceeds without cookies). Cookies are
     domain/path/secure-matched by _common.cookie_header_for and are sent only
-    on the direct fetch of the target host вЂ” never to Jina or Wayback.
+    on the direct fetch of the target host — never to Jina or Wayback.
     """
     if not cookies_path:
         return None
@@ -148,7 +148,7 @@ def _cookie_header_for(cookies_path, url):
         return None
 
 
-# ── SSRF guard (shared; see _common.ssrf_blocked) ───────────────────────────
+# ── SSRF guard (shared; see _common.ssrf_blocked) ──────────────────────────
 # The bridge is an agent-driven fetch primitive, so the check lives in
 # _common.ssrf_blocked — the same function the fetcher uses in every other
 # execution mode (Hermes plugin, standalone). Fail-open; kill switch
@@ -165,7 +165,8 @@ def _ssrf_gate(url):
     except Exception:
         return True, None
 
-# в”Ђв”Ђ Newer impersonation targets в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+# ── Newer impersonation targets ────────────────────────────────────────────
 # curl_cffi 0.14.0 supports up to chrome142 and safari260. The repo's default
 # pool (chrome110-124) is lagging; newer fingerprints reduce Cloudflare blocks.
 NEW_IMPERSONATE = [
@@ -174,8 +175,8 @@ NEW_IMPERSONATE = [
 ]
 LEGACY_IMPERSONATE = ["chrome110", "chrome116", "chrome120", "chrome124"]
 
-# в”Ђв”Ђ Deno JS render engine в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-# Deno 2.7.7 + happy-dom 15.11.7 вЂ” lightweight JS execution without headless
+# ── Deno JS render engine ──────────────────────────────────────────────────
+# Deno 2.7.7 + happy-dom 15.11.7 — lightweight JS execution without headless
 # browser. The engine is vendored INTO this repo (deno/deno.exe + deno/deno_cache)
 # so no external project paths are needed. Resolution order:
 #   1. WEB_MEDIA_PARSER_DENO / DENO_BIN env
@@ -230,11 +231,11 @@ def _render_available():
     return bool(_find_deno_bin()) and os.path.isfile(RENDER_WORKER) and bool(_find_deno_cache())
 
 
-# в”Ђв”Ђ Moli full-browser render engine в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-# Moli 1.1.2 вЂ” production-ready headless browser for AI agents (Rust, one
+# ── Moli full-browser render engine ────────────────────────────────────────
+# Moli 1.1.2 — production-ready headless browser for AI agents (Rust, one
 # binary ~97 MB). Unlike the Deno happy-dom worker, Moli has a real V8 and
 # network stack: it executes external <script src> and renders client-side
-# SPAs. It ALSO clears Cloudflare's JS challenge вЂ” but only when the page is
+# SPAs. It ALSO clears Cloudflare's JS challenge — but only when the page is
 # allowed to settle (MOLI_SETTLE_MS): measured 0 chars with --delay-ms 0 vs
 # 162k chars with 8 s on the same URL. Clearing is opportunistic (repeat calls
 # get CF 429), so this is a tier-2 escalation, not a guaranteed bypass.
@@ -245,7 +246,7 @@ def _render_available():
 #   3. moli on PATH
 #
 # Sandbox note: the DSH harness sandbox blocks Moli's HTTPS stack (HTTP works,
-# TLS fails in <50 ms even via proxy) вЂ” same class of restriction as the git
+# TLS fails in <50 ms even via proxy) — same class of restriction as the git
 # schannel issue. cmd_mfetch is fail-open: it returns None on any Moli failure,
 # so the caller falls back to the plain read ladder. Outside the sandbox Moli
 # works and gives full-JS rendering.
@@ -276,9 +277,9 @@ def _moli_available():
     return bool(_find_moli_bin())
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Cache helpers
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _cache_path(kind, key):
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
@@ -305,9 +306,9 @@ def _cache_put(kind, key, data):
         pass
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Registry stub + wrapper loader
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _install_stub_registry():
     class _Reg:
@@ -330,9 +331,9 @@ def _load_wrapper():
     return mod
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Module patching helpers
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _patch_modules(impersonate="newest", use_proxy=False, proxy_url="http://127.0.0.1:2080"):
     """Patch backend module globals for newer impersonation + optional proxy."""
@@ -359,14 +360,14 @@ def _resolve_impersonate_pool(impersonate):
     return None
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Wayback Machine resolver
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _wayback_latest(url):
     """Return (wayback_url, timestamp, snap_url) for the latest snapshot, or None.
 
-    Uses the plain snapshot URL (with toolbar), NOT the ``id_`` raw variant вЂ”
+    Uses the plain snapshot URL (with toolbar), NOT the ``id_`` raw variant —
     the ``id_`` URL is unreliable (returns 503 from web.archive.org). The
     toolbar HTML is still parsed fine by trafilatura.
     """
@@ -394,9 +395,9 @@ def _wayback_latest(url):
     return None
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Main commands
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def cmd_search(mod, args):
     cache_key = f"search:{args.query}:{args.max_validate}"
@@ -427,7 +428,7 @@ def cmd_search(mod, args):
 
 
 # Anti-bot challenge markers. A page whose *text* contains any of these is a
-# challenge/interstitial shell, not real content вЂ” even if it is long (the
+# challenge/interstitial shell, not real content — even if it is long (the
 # challenge HTML/CSS alone can exceed the weak-read threshold).
 _CHALLENGE_MARKERS = (
     "just a moment",            # Cloudflare classic interstitial
@@ -446,11 +447,11 @@ _CHALLENGE_MARKERS = (
     "we need to verify that you're not a robot",
 )
 
-# Vendor classification for `blocked` result flags вЂ” stable codes agents can
+# Vendor classification for `blocked` result flags — stable codes agents can
 # branch on (ported from DonSeTch's "stable error codes" idea):
 #   blocked: "cloudflare" | "aws_waf" | "recaptcha" | "login" | "generic"
 _CHALLENGE_VENDORS = (
-    # (marker, vendor) вЂ” order matters: most specific first
+    # (marker, vendor) — order matters: most specific first
     ("awswaf", "aws_waf"), ("token.awswaf", "aws_waf"), ("challenge.js", "aws_waf"),
     ("cf-clearance", "cloudflare"), ("cf-chl-", "cloudflare"), ("cf_chl_", "cloudflare"),
     ("challenge-platform", "cloudflare"), ("turnstile", "cloudflare"),
@@ -504,7 +505,7 @@ def cmd_read(mod, args):
             return cached
 
     # SSRF guard (fail-open): an agent-supplied URL must not reach
-    # private/internal/metadata networks. Blocked reads are NOT cached вЂ”
+    # private/internal/metadata networks. Blocked reads are NOT cached —
     # the kill switch may change the verdict on a later call.
     s_ok, s_reason = _ssrf_gate(args.url)
     if not s_ok:
@@ -519,7 +520,7 @@ def cmd_read(mod, args):
     cookie_header = _cookie_header_for(args.cookies, args.url)
 
     # Wall memory (fail-open, see _wall()): a host that recently served us
-    # anti-bot shells is boxed вЂ” skip the doomed live fetch and answer honestly
+    # anti-bot shells is boxed — skip the doomed live fetch and answer honestly
     # in milliseconds. The Wayback recovery below stays open either way: a box
     # means "stop hammering the live host", not "no answer".
     w_allowed, w_wait, _ = _wall_gate(args.url)
@@ -555,7 +556,7 @@ def cmd_read(mod, args):
             wb_body = wb_page.get("text") or wb_page.get("content") or ""
             wb_chars = len(wb_body)
             if wb_source != "failed" and wb_chars > 300:
-                # Wayback succeeded вЂ” use this result
+                # Wayback succeeded — use this result
                 page = wb_page
                 source = "wayback"
                 body = wb_body
@@ -580,7 +581,7 @@ def cmd_read(mod, args):
         result["blocked"] = "login"
 
     # Wall memory bookkeeping (fail-open): box repeat offenders, clear on real
-    # content. Transport failures (DNS/timeout/404) never create state вЂ” a
+    # content. Transport failures (DNS/timeout/404) never create state — a
     # refused request is never evidence that the page is gone.
     if live_blocked_by_wall:
         if source != "wayback":
@@ -661,9 +662,9 @@ def cmd_expand(mod, args):
     return result
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Deno JS render (happy-dom)
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _fetch_raw_html(url):
     """Fetch raw HTML via the Hermes plugin fetcher chain (no text extraction).
@@ -729,7 +730,7 @@ def _deno_render_call(html, page_url, max_chars, wait_ms, timeout):
         t.start()
         t.join(timeout=timeout)
         if t.is_alive():
-            return None  # stuck вЂ” killed below
+            return None  # stuck — killed below
         line = holder[0]
         if not line:
             return None
@@ -782,8 +783,8 @@ def cmd_render(mod, args):
                 html, args.url, args.max_chars, args.wait_ms, args.render_timeout)
             if rendered:
                 text = rendered.get("text") or ""
-                # Weak render (anti-bot shell, JS-disabled page): don't trust it вЂ”
-                # fall through to the read ladder (direct в†’ jina в†’ wayback).
+                # Weak render (anti-bot shell, JS-disabled page): don't trust it —
+                # fall through to the read ladder (direct → jina → wayback).
                 if len(text) >= 300 and not _is_challenge_text(text):
                     result = {
                         "url": args.url,
@@ -814,9 +815,9 @@ def cmd_render(mod, args):
     return result
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Moli full-browser render
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOUT,
                      settle_ms=MOLI_SETTLE_MS):
@@ -824,7 +825,7 @@ def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOU
 
     ``settle_ms`` is passed as ``--delay-ms``: without it Moli dumps challenged
     pages empty (see MOLI_SETTLE_MS). Returns None on any failure (binary
-    missing, timeout, TLS block in sandbox, network error) вЂ” the caller should
+    missing, timeout, TLS block in sandbox, network error) — the caller should
     fall back to the read ladder.
     """
     moli = _find_moli_bin()
@@ -861,17 +862,17 @@ def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOU
 
 
 def cmd_mfetch(mod, args):
-    """Fetch a URL via Moli вЂ” full-browser JS rendering (real V8, loads
+    """Fetch a URL via Moli — full-browser JS rendering (real V8, loads
     external scripts, renders client-side SPAs, and clears some Cloudflare JS
     challenges given the settle delay). Fail-open: if Moli is unavailable,
     fails (common in the DSH sandbox), or returns a shell, falls back to the
-    plain read ladder (direct в†’ jina в†’ wayback).
+    plain read ladder (direct → jina → wayback).
 
     Invoke standalone::
 
         python webtools_bridge.py mfetch --url "https://..." --out ...
 
-    Or as an escalation in ``cmd_render``: Deno в†’ Moli в†’ read ladder.
+    Or as an escalation in ``cmd_render``: Deno → Moli → read ladder.
     """
     if not args.url:
         return {"error": "mfetch requires --url"}
@@ -883,7 +884,7 @@ def cmd_mfetch(mod, args):
         if cached is not None:
             return cached
 
-    # SSRF guard (fail-open), same policy as cmd_read вЂ” before the browser.
+    # SSRF guard (fail-open), same policy as cmd_read — before the browser.
     s_ok, s_reason = _ssrf_gate(args.url)
     if not s_ok:
         return {"url": args.url, "source": "failed", "chars": 0, "text": "",
@@ -898,7 +899,7 @@ def cmd_mfetch(mod, args):
     if rendered and rendered["chars"] >= _MOLI_MIN_CONTENT:
         text = rendered["text"]
         if _is_challenge_text(text):
-            # Moli returned a challenge shell too вЂ” treat as blocked
+            # Moli returned a challenge shell too — treat as blocked
             result = {
                 "url": args.url,
                 "title": rendered["title"],
@@ -908,7 +909,7 @@ def cmd_mfetch(mod, args):
                 "challenge": True,
                 "blocked": _challenge_kind(text) or "generic",
             }
-            # Even the browser tier hit the wall вЂ” strongest wall signal.
+            # Even the browser tier hit the wall — strongest wall signal.
             _wall_note(args.url, "wall", result["blocked"])
         else:
             result = {
@@ -925,14 +926,14 @@ def cmd_mfetch(mod, args):
         return result
 
     # Fail-open: no render, an empty one, or a thin shell that slipped past the
-    # marker list (measured: a CF 429 dumped to markdown is ~496 chars) вЂ” fall
+    # marker list (measured: a CF 429 dumped to markdown is ~496 chars) — fall
     # back to the plain read ladder instead of serving the shell as content.
     return cmd_read(mod, args)
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Probe mode (token-cheap claim verification)
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _normalize_probe(text):
     """Collapse whitespace + lowercase for robust claim matching."""
@@ -959,7 +960,7 @@ def _extract_excerpts(text, claim, max_excerpts=3, radius=220):
 
 
 def cmd_probe(mod, args):
-    """Verify a claim against a URL вЂ” MATCH/NO-MATCH + up to 3 excerpts.
+    """Verify a claim against a URL — MATCH/NO-MATCH + up to 3 excerpts.
 
     Token-cheap alternative to a full read: returns ~60 tokens of evidence
     instead of the whole page (ported from DonSeTch's `must_contain` idea).
@@ -973,8 +974,8 @@ def cmd_probe(mod, args):
         if cached is not None:
             return cached
 
-    # Fetch the page through the full ladder (direct в†’ jina в†’ wayback в†’ deno).
-    # Probe doesn't need the whole page вЂ” cap chars to keep it cheap.
+    # Fetch the page through the full ladder (direct → jina → wayback → deno).
+    # Probe doesn't need the whole page — cap chars to keep it cheap.
     page = cmd_read(mod, args)
     body = page.get("text") or ""
     source = page.get("source", "")
@@ -983,7 +984,7 @@ def cmd_probe(mod, args):
     if blocked or page.get("challenge"):
         result = {
             "url": args.url,
-            "match": None,          # could not verify вЂ” page is a wall
+            "match": None,          # could not verify — page is a wall
             "blocked": blocked or "generic",
             "source": source,
             "claim": args.claim,
@@ -1012,9 +1013,9 @@ def cmd_probe(mod, args):
     return result
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  argparse
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_parser():
     ap = argparse.ArgumentParser(description="Hermes Web Tools Bridge v3")
@@ -1063,9 +1064,9 @@ def _unique_out_path(cmd):
     return os.path.join(tempfile.gettempdir(), f"hermes_web_{cmd}_{ts}_{pid}.json")
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Entry point
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     ap = _build_parser()
