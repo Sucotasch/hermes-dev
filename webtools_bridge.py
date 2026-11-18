@@ -271,9 +271,10 @@ def _render_available():
 # ── Moli full-browser render engine ────────────────────────────────────────
 # Moli 1.1.1 — production-ready headless browser for AI agents (Rust, one
 # binary ~97 MB). Unlike the Deno happy-dom worker, Moli has a real V8 and
-# network stack: it executes external <script src>, survives Cloudflare/AWS
-# WAF JS challenges, and renders SPAs. It is the "tier-2" escalation for
-# pages the lightweight ladder cannot read.
+# network stack: it executes external <script src> and renders client-side
+# SPAs. It does NOT reliably clear JS challenges (verified: the interstitial
+# comes back in this environment) — it is the "tier-2" escalation for pages
+# the lightweight ladder cannot read, not a challenge solver.
 #
 # Vendored into this repo (moli/moli.exe, gitignored). Resolution order:
 #   1. MOLI_BIN env
@@ -876,9 +877,9 @@ def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOU
 
 def cmd_mfetch(mod, args):
     """Fetch a URL via Moli — full-browser JS rendering (real V8, loads
-    external scripts, passes Cloudflare/AWS WAF challenges). Fail-open: if
-    Moli is unavailable or fails (common in the DSH sandbox), falls back to
-    the plain read ladder (direct → jina → wayback).
+    external scripts, renders client-side SPAs; does NOT reliably clear JS
+    challenges). Fail-open: if Moli is unavailable or fails (common in the DSH
+    sandbox), falls back to the plain read ladder (direct → jina → wayback).
 
     Invoke standalone::
 

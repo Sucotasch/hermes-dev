@@ -193,7 +193,7 @@ python webtools_bridge.py image --query "red panda" --out "$env:TEMP\w_image.jso
 python webtools_bridge.py expand --query "topic" --urls "https://a.example,https://b.example" --out "$env:TEMP\w_expand.json"
 python webtools_bridge.py render --url "https://js-heavy.example" --out "$env:TEMP\w_render.json"
 python webtools_bridge.py probe --claim "llama.cpp supports flash attention" --out "$env:TEMP\w_probe.json"
-python webtools_bridge.py mfetch --url "https://cloudflare-protected.example" --out "$env:TEMP\w_mfetch.json"
+python webtools_bridge.py mfetch --url "https://spa-app.example" --out "$env:TEMP\w_mfetch.json"   # needs moli/moli.exe; degrades to read without it
 ```
 
 Bridge-only extras over the backend:
@@ -203,6 +203,19 @@ Bridge-only extras over the backend:
 - **`--impersonate newest`** (default) — patches the backend's TLS pool to chrome136/133a/131 + safari180/184/260.
 - **`render`** — Deno 2.7.7 + happy-dom executes a page's inline JS (no headless browser); fail-open to the plain `read` ladder when rendering yields <300 chars.
 - **`--no-cache` / `--no-wayback` / `--render-timeout` / `--wait-ms`** toggles.
+
+**Moli full-browser tier (optional).** `mfetch` is a direct command that runs
+the Moli headless browser (`moli fetch --dump markdown`) for pages that need a
+real V8 + network stack (client-side SPAs, content behind external scripts);
+`render` also escalates Deno → Moli → the plain `read` ladder. The binary is
+**not vendored in git** (`moli/` is gitignored, ~97 MB): resolution order is
+`MOLI_BIN` → `moli/moli.exe` → `PATH`. Everything fails open — with no binary,
+or when Moli returns a wall, the call degrades to the normal `read` ladder and
+the result's `source` field says which tier actually answered. Honest limits:
+Moli executes external scripts and renders client-side SPAs (verified); we have
+**not** verified that it clears a given JS challenge (in our test environment
+the challenge interstitial came back), and inside the harness sandbox Moli's
+HTTPS stack is blocked (HTTP still works), so `mfetch` degrades to `read` there.
 
 Deno engine setup (once, ~130 MB, gitignored):
 ```powershell

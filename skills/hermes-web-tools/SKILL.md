@@ -142,9 +142,10 @@ Optional flags:
   (`source:"direct"|"jina"|"wayback"|"failed"`).
 
 **mfetch** → `{ url, title, source("moli"|"direct"|"jina"|"wayback"|"failed"), chars, text, challenge?, blocked? }`
-- Full-browser render via Moli (vendored `moli/moli.exe`). Real V8 + network
-  stack — executes external scripts, passes Cloudflare/AWS WAF JS challenges
-  that the Deno happy-dom worker cannot.
+- Full-browser render via Moli (`moli/moli.exe`; **not** vendored in git, must
+  be placed manually — see README §4). Real V8 + network stack: it executes
+  external scripts and renders client-side SPAs that the Deno happy-dom worker
+  cannot. It does **not** reliably clear JS challenges (see the ⚠️ note above).
 - `source:"moli"` means Moli successfully rendered the page. `challenge` and
   `blocked` fields follow the same semantics as `read`.
 - Fail-open: if Moli is unavailable, blocked by the sandbox (common in this
