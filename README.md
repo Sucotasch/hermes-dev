@@ -215,10 +215,22 @@ real V8 + network stack (client-side SPAs, content behind external scripts);
 **not vendored in git** (`moli/` is gitignored, ~97 MB): resolution order is
 `MOLI_BIN` → `moli/moli.exe` → `PATH`. Everything fails open — with no binary,
 or when Moli returns a wall, the call degrades to the normal `read` ladder and
-the result's `source` field says which tier actually answered. Honest limits:
-Moli executes external scripts and renders client-side SPAs (verified); we have
-**not** verified that it clears a given JS challenge (in our test environment
-the challenge interstitial came back), and inside the harness sandbox Moli's
+the result's `source` field says which tier actually answered.
+
+Settling matters: Moli waits `--moli-settle` ms (default 8000) before dumping.
+Measured on Moli 1.1.2: a Cloudflare JS challenge needs those seconds — with a
+0 ms dump the same page came back **empty (0 chars in ~1 s)**; with the delay it
+returned the full article (**161k chars, content verified**). `--wait-until
+networkidle` alone changed nothing. The cost is latency: `mfetch` now takes
+~10–12 s instead of ~1 s (`--moli-settle 0` restores the fast, empty-on-challenge
+behaviour).
+
+Honest limits (measured, not assumed): Moli **does** clear Cloudflare's JS
+challenge on some sites (stackoverflow: 4 of 9 attempts across runs, the rest
+came back as CF **429** "Just a moment…"), so treat challenge clearing as
+opportunistic, not guaranteed. Hard blocks are different and out of scope —
+g2.com answered "Sorry, you have been blocked", glassdoor answered a regional
+refusal; no browser fixes an ASN or geo block. Inside the harness sandbox Moli's
 HTTPS stack is blocked (HTTP still works), so `mfetch` degrades to `read` there.
 
 Deno engine setup (once, ~130 MB, gitignored):

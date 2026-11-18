@@ -135,7 +135,7 @@ def test_read_kill_switch_reaches_fetcher(wall, monkeypatch):
 def test_mfetch_blocks_private_before_moli(wall):
     args = types.SimpleNamespace(url="http://169.254.169.254/meta",
                                  max_chars=8000, no_cache=True,
-                                 moli_timeout=5.0, proxy=False,
+                                 moli_timeout=5.0, moli_settle=8000, proxy=False,
                                  proxy_url="http://127.0.0.1:2080",
                                  cookies="")
     res = bridge.cmd_mfetch(None, args)          # mod unused: guard fires first

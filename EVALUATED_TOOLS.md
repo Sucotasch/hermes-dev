@@ -105,12 +105,34 @@ output formats re-verified unchanged, `mfetch` bridge path re-verified OK):**
 - Honest limits: no GPU/WebGL/Canvas parity, no pixel-perfect Chrome; 81.9%
   task success (Chrome 99.8%) on Lexbench-Headless-Browser; login walls remain.
 
-**⚠️ Verified limitation — does NOT solve Cloudflare/AWS WAF challenges.** We
-tested `moli fetch --dump semantic_tree_text --wait-until done` on
-stackoverflow.com: it returns the «Just a moment...» challenge interstitial,
-identical to curl_cffi — no `cf_clearance`/Turnstile solving in `fetch` mode.
-Same for AWS WAF (IMDB). So Moli is a **SPA renderer, not an anti-bot bypass**;
-for challenged pages the read ladder's wayback fallback stays the answer.
+**⚠️ CORRECTED (2026-11) — it does clear Cloudflare's JS challenge, but only
+with a settle delay.** The earlier note in this file said `fetch` "does NOT
+solve challenges". That was measured with `--wait-until done` and, crucially,
+with **`--delay-ms 0`**. A controlled run on Moli 1.1.2 (same URL, same session,
+4 targets) shows the delay is the whole difference:
+
+| Invocation (stackoverflow.com) | Result |
+|---|---|
+| `--dump markdown` (what `mfetch` used to run) | **0 chars**, ~1.1 s |
+| `--wait-until networkidle` only | **0 chars**, ~1.7 s — no help |
+| `--delay-ms 8000` | **162 268 chars**, real page (markers verified) |
+| `--delay-ms 8000 --wait-until networkidle` | **161 173 chars**, real page |
+
+Stability is the honest caveat: of 9 attempts on that URL, 4 returned the real
+article and 5 returned a Cloudflare **HTTP 429** with `title="Just a moment…"`
+(45 KB HTML → ~496 chars of markdown, no marker from our list). A 75 s cooldown
+did not recover within the test. Hard blocks are a different class and stay
+blocked: g2.com → "Sorry, you have been blocked"; glassdoor → regional refusal.
+A persistent `--profile-dir` does mint and store `cf_clearance` (verified:
+`cookies.json` contained `__cf_bm`, `cf_clearance`, `cf_chl_rc_ni`), so cookie
+reuse is a lever for future work, not something the bridge does today.
+
+Consequences shipped: `mfetch` now passes `--moli-settle` (default 8000 ms →
+`moli --delay-ms`), and a render under 300 chars is treated as a shell and falls
+through to the `read` ladder instead of being served as content. Post-fix live
+check: stackoverflow → `source=moli`, **161 573 chars**, "branch prediction"
+present, 12.3 s; example.com → 958 chars, 10.7 s (the delay costs ~8 s per
+call; `--moli-settle 0` restores the old fast/empty behaviour).
 
 **Why we adopted it as a render tier (not as a replacement):** the DSH sandbox
 blocks Moli's HTTPS stack in the default mode (HTTP works, TLS fails <50 ms —

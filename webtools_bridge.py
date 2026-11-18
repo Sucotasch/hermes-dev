@@ -269,12 +269,13 @@ def _render_available():
 
 
 # ── Moli full-browser render engine ────────────────────────────────────────
-# Moli 1.1.1 — production-ready headless browser for AI agents (Rust, one
+# Moli 1.1.2 — production-ready headless browser for AI agents (Rust, one
 # binary ~97 MB). Unlike the Deno happy-dom worker, Moli has a real V8 and
 # network stack: it executes external <script src> and renders client-side
-# SPAs. It does NOT reliably clear JS challenges (verified: the interstitial
-# comes back in this environment) — it is the "tier-2" escalation for pages
-# the lightweight ladder cannot read, not a challenge solver.
+# SPAs. It ALSO clears Cloudflare's JS challenge — but only when the page is
+# allowed to settle (MOLI_SETTLE_MS): measured 0 chars with --delay-ms 0 vs
+# 162k chars with 8 s on the same URL. Clearing is opportunistic (repeat calls
+# get CF 429), so this is a tier-2 escalation, not a guaranteed bypass.
 #
 # Vendored into this repo (moli/moli.exe, gitignored). Resolution order:
 #   1. MOLI_BIN env
@@ -288,6 +289,16 @@ def _render_available():
 # works and gives full-JS rendering.
 _MOLI_LOCAL = os.path.join(_REPO_ROOT, "moli", "moli.exe")
 MOLI_TIMEOUT = 30.0  # seconds
+# Settle time before Moli dumps the page. Measured (2026-11, Moli 1.1.2): a
+# Cloudflare JS challenge needs ~8 s to resolve; with the default --delay-ms 0
+# Moli dumps an empty document for challenged pages (0 chars in ~1 s), while
+# with the delay it returned the real page (162k chars, content verified).
+# `--wait-until networkidle` alone changed nothing. 0 disables the delay.
+MOLI_SETTLE_MS = 8000
+# Below this, Moli's markdown is a shell, not content: a CF 429/interstitial
+# dumped to markdown measured ~496 chars with no marker from our list, so the
+# marker check alone would have passed it through as "real".
+_MOLI_MIN_CONTENT = 300
 
 
 def _find_moli_bin():
@@ -838,16 +849,21 @@ def cmd_render(mod, args):
 #  Moli full-browser render
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOUT):
+def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOUT,
+                     settle_ms=MOLI_SETTLE_MS):
     """Run ``moli fetch --dump markdown`` and return the result dict or None.
 
-    Returns None on any failure (binary missing, timeout, TLS block in sandbox,
-    network error) — the caller should fall back to the read ladder.
+    ``settle_ms`` is passed as ``--delay-ms``: without it Moli dumps challenged
+    pages empty (see MOLI_SETTLE_MS). Returns None on any failure (binary
+    missing, timeout, TLS block in sandbox, network error) — the caller should
+    fall back to the read ladder.
     """
     moli = _find_moli_bin()
     if not moli:
         return None
     cmd = [moli, "fetch", "--dump", "markdown", "--timeout", str(int(timeout * 1000))]
+    if settle_ms and settle_ms > 0:
+        cmd.extend(["--delay-ms", str(int(settle_ms))])
     if proxy_url:
         cmd.extend(["--http-proxy", proxy_url])
     cmd.append(url)
@@ -877,9 +893,10 @@ def _moli_fetch_call(url, proxy_url="http://127.0.0.1:2080", timeout=MOLI_TIMEOU
 
 def cmd_mfetch(mod, args):
     """Fetch a URL via Moli — full-browser JS rendering (real V8, loads
-    external scripts, renders client-side SPAs; does NOT reliably clear JS
-    challenges). Fail-open: if Moli is unavailable or fails (common in the DSH
-    sandbox), falls back to the plain read ladder (direct → jina → wayback).
+    external scripts, renders client-side SPAs, and clears some Cloudflare JS
+    challenges given the settle delay). Fail-open: if Moli is unavailable,
+    fails (common in the DSH sandbox), or returns a shell, falls back to the
+    plain read ladder (direct → jina → wayback).
 
     Invoke standalone::
 
@@ -907,8 +924,9 @@ def cmd_mfetch(mod, args):
                                 "the same pwsh call")}
 
     proxy = args.proxy_url if args.proxy else None
-    rendered = _moli_fetch_call(args.url, proxy, args.moli_timeout)
-    if rendered:
+    rendered = _moli_fetch_call(args.url, proxy, args.moli_timeout,
+                                args.moli_settle)
+    if rendered and rendered["chars"] >= _MOLI_MIN_CONTENT:
         text = rendered["text"]
         if _is_challenge_text(text):
             # Moli returned a challenge shell too — treat as blocked
@@ -937,7 +955,9 @@ def cmd_mfetch(mod, args):
             _cache_put("mfetch", cache_key, result)
         return result
 
-    # Fail-open: fall back to the plain read ladder
+    # Fail-open: no render, an empty one, or a thin shell that slipped past the
+    # marker list (measured: a CF 429 dumped to markdown is ~496 chars) — fall
+    # back to the plain read ladder instead of serving the shell as content.
     return cmd_read(mod, args)
 
 
@@ -1057,6 +1077,9 @@ def _build_parser():
                     help="Grace period in ms for page scripts (default 500)")
     ap.add_argument("--moli-timeout", type=float, default=MOLI_TIMEOUT,
                     help="Moli browser timeout in seconds (default 30.0)")
+    ap.add_argument("--moli-settle", type=int, default=MOLI_SETTLE_MS,
+                    help="Ms to let a page settle before Moli dumps it (default 8000; "
+                         "0 = dump immediately, which returns empty on JS challenges)")
     # expand
     ap.add_argument("--urls", default="", help="Comma-separated source URLs (for expand)")
     ap.add_argument("--max-new-links", type=int, default=10, help="Max new links to fetch")

@@ -287,10 +287,11 @@ def test_bridge_mfetch_challenge_notes_wall(state_dir, monkeypatch):
     monkeypatch.setattr(bridge, "_moli_available", lambda: True)
     monkeypatch.setattr(
         bridge, "_moli_fetch_call",
-        lambda url, proxy=None, timeout=None: {"title": "t", "chars": 300,
-                                               "text": "Just a moment..."})
+        lambda url, proxy=None, timeout=None, settle_ms=None:
+            {"title": "t", "chars": 300, "text": "Just a moment..."})
     args = types.SimpleNamespace(url="http://mf.example/page", max_chars=8000,
-                                 no_cache=True, moli_timeout=30.0, proxy=False,
+                                 no_cache=True, moli_timeout=30.0, moli_settle=8000,
+                                 proxy=False,
                                  proxy_url="http://127.0.0.1:2080", cookies="")
     res = bridge.cmd_mfetch(None, args)
     assert res["challenge"] is True

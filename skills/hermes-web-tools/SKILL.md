@@ -87,8 +87,11 @@ python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" pro
 # MFETCH — full-browser render via Moli (vendored moli/moli.exe): REAL V8 +
 # network, so it renders SPAs (React/Vue/Next.js CSR sites) that the Deno
 # happy-dom worker (inline JS only, sandboxed no-net) cannot extract.
-# ⚠️ Moli does NOT solve Cloudflare/AWS WAF JS challenges — for challenged
-# pages the read ladder's wayback fallback is the answer.
+# ✅ Moli CAN clear Cloudflare's JS challenge, but only if you let the page
+# settle: --moli-settle (default 8000 ms) is passed as moli --delay-ms.
+# Measured (Moli 1.1.2): 0 ms dump = 0 chars in ~1 s; 8 s = 161k chars of the
+# real article. Clearing is opportunistic — repeated calls hit CF 429
+# ("Just a moment…"), so expect variance. Hard ASN/geo blocks are out of scope.
 # ⚠️ REQUIRES sandbox_permissions: danger-full-access on the pwsh call —
 # the sandbox blocks Moli's TLS stack (like git's schannel issue); with the
 # escalation Moli works for HTTPS. Without it, mfetch degrades to read.
@@ -145,7 +148,15 @@ Optional flags:
 - Full-browser render via Moli (`moli/moli.exe`; **not** vendored in git, must
   be placed manually — see README §4). Real V8 + network stack: it executes
   external scripts and renders client-side SPAs that the Deno happy-dom worker
-  cannot. It does **not** reliably clear JS challenges (see the ⚠️ note above).
+  cannot. It **can** clear Cloudflare's JS challenge when given the settle
+  delay (verified), but not reliably under repeated calls (CF 429) — see the
+  ✅ note above.
+- `--moli-settle N` (default 8000 ms): how long the page may settle before the
+  dump. This is what makes challenge clearing work; `0` gives a fast, empty
+  result on challenged pages. Cost: `mfetch` takes ~10–12 s.
+- A render shorter than 300 chars is treated as a shell and falls through to
+  the `read` ladder (measured: a CF 429 dumped to markdown is ~496 chars and
+  carries none of our challenge markers).
 - `source:"moli"` means Moli successfully rendered the page. `challenge` and
   `blocked` fields follow the same semantics as `read`.
 - Fail-open: if Moli is unavailable, blocked by the sandbox (common in this
@@ -207,9 +218,10 @@ Optional flags:
   to `read`, which is usually equally weak. Verify `source:"deno-render"` before trusting
   the post-JS text.
 - **Browser only on demand:** the plain read/render ladder has no browser;
-  `mfetch` (vendored Moli) renders real SPAs, needs `danger-full-access`
-  escalation in this sandbox and does NOT solve JS challenges — for those the
-  Wayback fallback is the answer (see mfetch above).
+  `mfetch` (vendored Moli) renders real SPAs and needs `danger-full-access`
+  escalation in this sandbox. It clears some Cloudflare JS challenges with the
+  settle delay (verified, opportunistic — CF 429 under repeat calls); hard
+  ASN/geo blocks stay blocked and Wayback remains the fallback (see mfetch).
 - **egress works** (confirmed HTTP 200 from duckduckgo), but some hosts rate-limit;
   repeat calls are cache-protected, `--proxy` adds a retry path via local NecoBox.
 - **NecoBox proxy** (`127.0.0.1:2080`) is local and free: pass `--proxy` when a site
@@ -262,6 +274,7 @@ python "d:\Arx\Software Downloads\Hermes copy\hermes-dev\webtools_bridge.py" pro
 | probe `match:false` on real content | claim text genuinely absent from the body | `read` the page; probe is exact-substring on extracted text |
 | ranking looks odd | authority/coverage placement factor | A/B: `$env:HERMES_AUTHORITY="0"` in the same pwsh call |
 | one read took ~16 s | full ladder ran (direct → Jina → Wayback) | normal; repeats hit the disk cache in ~0.5 s |
+| `mfetch` took ~10–12 s | settle delay (default 8 s) + browser start | normal; `--moli-settle 0` is faster but returns empty on challenged pages |
 
 Env kill-switches do not persist between pwsh calls — set and run in ONE invocation,
 e.g. `$env:HERMES_WALL_MEMORY="0"; python "<bridge>" read --url ... --out ...`.
