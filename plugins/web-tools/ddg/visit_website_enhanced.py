@@ -610,6 +610,40 @@ def extract_js_data(html):
 _TRACKING_IMG_RE = re.compile(r'(?:pixel|track|1x1|spacer|blank|clear\.gif|analytics|badge|doubleclick|gstatic)', re.I)
 
 
+_IMG_EXT_RE = re.compile(r"\.(?:jpe?g|png|gif|webp|avif|bmp|svgz?)(?:$|[?#])", re.I)
+
+
+def _plausible_image_upgrade(original, candidate):
+    """True when a sieve rewrite still points at an image, not at a page.
+
+    Imagus rules are written for an extension that can show iframes and
+    extension URLs, so a few of them deliberately return a *page* (e.g. the
+    YouTube rule maps a thumbnail to ``/embed/<id>?thumb``). In this pipeline
+    the result is fetched and decoded as an image, so such rewrites are rejected
+    and the original thumbnail kept. Measured on a real run: 146 of 2597 sieve
+    calls produced rewrites, and the YouTube ones were embed pages with a
+    doubled ``?`` — they wasted proxy retries before the Pillow filter dropped
+    them.
+
+    Rules: never accept ``imagus://``/``data:`` (not fetchable here), never
+    accept a malformed double query, and never downgrade an image file to a
+    URL without an image extension.
+    """
+    try:
+        if not candidate:
+            return False
+        low = candidate.strip().lower()
+        if low.startswith(("imagus://", "data:")):
+            return False
+        if candidate.count("?") > 1:          # "...?thumb?sqp=..." artifact
+            return False
+        if _IMG_EXT_RE.search(candidate):
+            return True
+        return not _IMG_EXT_RE.search(original)   # allow extensionless CDN URLs
+    except Exception:
+        return False
+
+
 def upgrade_to_fullsize(url, source_url=""):
     """Try common patterns to upgrade a thumbnail URL to full-size."""
     if not url:
@@ -648,7 +682,7 @@ def upgrade_to_fullsize(url, source_url=""):
     try:
         from sieve import apply as _sieve_apply
         sieved = _sieve_apply(url, source_url or url)
-        if sieved and sieved != url:
+        if sieved and sieved != url and _plausible_image_upgrade(url, sieved):
             url = sieved
     except Exception:
         pass
